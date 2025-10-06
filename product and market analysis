@@ -1,0 +1,418 @@
+import React, { useState, useMemo } from 'react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine } from 'recharts';
+import { Activity, Upload } from 'lucide-react';
+import Papa from 'papaparse';
+
+const IMCMarketAnalysis = () => {
+  const [rawData, setRawData] = useState([]);
+  const [csvText, setCsvText] = useState('');
+  const [showInput, setShowInput] = useState(true);
+
+  const handleParse = () => {
+    Papa.parse(csvText, {
+      header: true,
+      dynamicTyping: true,
+      skipEmptyLines: true,
+      complete: (results) => {
+        setRawData(results.data.filter(row => row.product));
+        setShowInput(false);
+      }
+    });
+  };
+
+  const processedData = useMemo(() => {
+    if (rawData.length === 0) return {};
+    
+    const grouped = {};
+    
+    rawData.forEach(row => {
+      if (!row.product) return;
+      
+      if (!grouped[row.product]) {
+        grouped[row.product] = [];
+      }
+      
+      grouped[row.product].push({
+        ...row,
+        liquidity_imbalance: row.buy_liquidity - row.sell_liquidity,
+        total_liquidity: row.buy_liquidity + row.sell_liquidity
+      });
+    });
+
+    Object.keys(grouped).forEach(product => {
+      const data = grouped[product];
+      data.sort((a, b) => a.timestamp - b.timestamp);
+      
+      for (let i = 1; i < data.length; i++) {
+        data[i].price_change = data[i].mid_price - data[i-1].mid_price;
+      }
+    });
+    
+    return grouped;
+  }, [rawData]);
+
+  const normalizedCroissantsJams = useMemo(() => {
+    if (!processedData.CROISSANTS || !processedData.JAMS) return [];
+    
+    const croissants = processedData.CROISSANTS;
+    const jams = processedData.JAMS;
+    
+    const croissantsMean = croissants.reduce((sum, item) => sum + item.mid_price, 0) / croissants.length;
+    const croissantsStd = Math.sqrt(
+      croissants.reduce((sum, item) => sum + Math.pow(item.mid_price - croissantsMean, 2), 0) / croissants.length
+    );
+    
+    const jamsMean = jams.reduce((sum, item) => sum + item.mid_price, 0) / jams.length;
+    const jamsStd = Math.sqrt(
+      jams.reduce((sum, item) => sum + Math.pow(item.mid_price - jamsMean, 2), 0) / jams.length
+    );
+    
+    const normalized = [];
+    
+    for (let i = 0; i < Math.min(croissants.length, jams.length); i++) {
+      const c = croissants[i];
+      const j = jams[i];
+      
+      if (c && j) {
+        const croissantsNorm = (c.mid_price - croissantsMean) / croissantsStd;
+        const jamsNorm = (j.mid_price - jamsMean) / jamsStd;
+        const jamsInverseNorm = -jamsNorm;
+        
+        normalized.push({
+          timestamp: c.timestamp,
+          croissants_normalized: croissantsNorm,
+          jams_inverse_normalized: jamsInverseNorm
+        });
+      }
+    }
+    
+    return normalized;
+  }, [processedData]);
+
+  if (showInput) {
+    return (
+      <div className="w-full min-h-screen bg-slate-900 text-white p-6">
+        <div className="max-w-4xl mx-auto">
+          <h1 className="text-3xl font-bold mb-4 flex items-center gap-2">
+            <Upload className="w-8 h-8" />
+            Load CSV Data
+          </h1>
+          <p className="text-slate-400 mb-4">
+            Paste your CSV data below (including the header row)
+          </p>
+          
+          <textarea
+            value={csvText}
+            onChange={(e) => setCsvText(e.target.value)}
+            placeholder="timestamp,product,mid_price,sell_liquidity,buy_liquidity
+0,CROISSANTS,4241.5,39,39
+0,DJEMBES,13296.5,24,24
+..."
+            className="w-full h-96 bg-slate-800 border border-slate-600 rounded p-4 font-mono text-sm text-white"
+          />
+          
+          <div className="mt-4 flex gap-4">
+            <button
+              onClick={handleParse}
+              disabled={!csvText}
+              className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 disabled:cursor-not-allowed px-6 py-3 rounded font-bold transition"
+            >
+              Parse & Analyze Data
+            </button>
+            <div className="text-slate-400 flex items-center">
+              {csvText.split('\n').filter(l => l.trim()).length} lines
+            </div>
+          </div>
+
+          <div className="mt-6 bg-blue-900 bg-opacity-20 border border-blue-500 rounded-lg p-4">
+            <h3 className="font-bold mb-2">💡 Quick Start</h3>
+            <ol className="text-sm text-slate-300 space-y-1 list-decimal list-inside">
+              <li>Open your CSV file in a text editor or Excel</li>
+              <li>Copy all the contents (Ctrl+A, Ctrl+C)</li>
+              <li>Paste into the text box above</li>
+              <li>Click "Parse & Analyze Data"</li>
+            </ol>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const croissantsData = processedData.CROISSANTS || [];
+  const jamsData = processedData.JAMS || [];
+  const djembesData = processedData.DJEMBES || [];
+  const basket1Data = processedData.PICNIC_BASKET1 || [];
+  const basket2Data = processedData.PICNIC_BASKET2 || [];
+
+  return (
+    <div className="w-full min-h-screen bg-slate-900 text-white p-6">
+      <div className="max-w-7xl mx-auto">
+        <div className="flex justify-between items-center mb-4">
+          <h1 className="text-3xl font-bold flex items-center gap-2">
+            <Activity className="w-8 h-8" />
+            IMC Prosperity3 Round2 - Product & Basket Price Analysis
+          </h1>
+          <button
+            onClick={() => setShowInput(true)}
+            className="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded text-sm transition"
+          >
+            Load New Data
+          </button>
+        </div>
+        
+        <p className="text-slate-400 mb-6">
+          {rawData.length} total data points | {Object.keys(processedData).length} products
+        </p>
+
+        {/* Individual Product Price Charts */}
+        <div className="space-y-6 mb-6">
+          {/* CROISSANTS */}
+          <div className="bg-slate-800 rounded-lg p-4">
+            <h2 className="text-xl font-bold mb-4 text-blue-400">CROISSANTS Price Movement</h2>
+            <div className="grid grid-cols-3 gap-4 mb-4">
+              <div className="bg-slate-700 rounded p-3">
+                <div className="text-slate-400 text-xs">Starting Price</div>
+                <div className="text-lg font-bold">{croissantsData[0]?.mid_price?.toFixed(2)}</div>
+              </div>
+              <div className="bg-slate-700 rounded p-3">
+                <div className="text-slate-400 text-xs">Final Price</div>
+                <div className="text-lg font-bold">{croissantsData[croissantsData.length-1]?.mid_price?.toFixed(2)}</div>
+              </div>
+              <div className="bg-slate-700 rounded p-3">
+                <div className="text-slate-400 text-xs">Total Change</div>
+                <div className={`text-lg font-bold ${(croissantsData[croissantsData.length-1]?.mid_price - croissantsData[0]?.mid_price) < 0 ? 'text-red-400' : 'text-green-400'}`}>
+                  {(croissantsData[croissantsData.length-1]?.mid_price - croissantsData[0]?.mid_price).toFixed(2)}
+                </div>
+              </div>
+            </div>
+            <ResponsiveContainer width="100%" height={250}>
+              <LineChart data={croissantsData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#475569" />
+                <XAxis dataKey="timestamp" stroke="#94a3b8" />
+                <YAxis stroke="#94a3b8" domain={['dataMin - 5', 'dataMax + 5']} />
+                <Tooltip contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569' }} />
+                <Line type="monotone" dataKey="mid_price" stroke="#3b82f6" strokeWidth={2} dot={false} name="Price" />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+
+          {/* JAMS */}
+          <div className="bg-slate-800 rounded-lg p-4">
+            <h2 className="text-xl font-bold mb-4 text-green-400">JAMS Price Movement</h2>
+            <div className="grid grid-cols-3 gap-4 mb-4">
+              <div className="bg-slate-700 rounded p-3">
+                <div className="text-slate-400 text-xs">Starting Price</div>
+                <div className="text-lg font-bold">{jamsData[0]?.mid_price?.toFixed(2)}</div>
+              </div>
+              <div className="bg-slate-700 rounded p-3">
+                <div className="text-slate-400 text-xs">Final Price</div>
+                <div className="text-lg font-bold">{jamsData[jamsData.length-1]?.mid_price?.toFixed(2)}</div>
+              </div>
+              <div className="bg-slate-700 rounded p-3">
+                <div className="text-slate-400 text-xs">Total Change</div>
+                <div className={`text-lg font-bold ${(jamsData[jamsData.length-1]?.mid_price - jamsData[0]?.mid_price) < 0 ? 'text-red-400' : 'text-green-400'}`}>
+                  {(jamsData[jamsData.length-1]?.mid_price - jamsData[0]?.mid_price).toFixed(2)}
+                </div>
+              </div>
+            </div>
+            <ResponsiveContainer width="100%" height={250}>
+              <LineChart data={jamsData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#475569" />
+                <XAxis dataKey="timestamp" stroke="#94a3b8" />
+                <YAxis stroke="#94a3b8" domain={['dataMin - 5', 'dataMax + 5']} />
+                <Tooltip contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569' }} />
+                <Line type="monotone" dataKey="mid_price" stroke="#10b981" strokeWidth={2} dot={false} name="Price" />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+
+          {/* DJEMBES */}
+          <div className="bg-slate-800 rounded-lg p-4">
+            <h2 className="text-xl font-bold mb-4 text-purple-400">DJEMBES Price Movement</h2>
+            <div className="grid grid-cols-3 gap-4 mb-4">
+              <div className="bg-slate-700 rounded p-3">
+                <div className="text-slate-400 text-xs">Starting Price</div>
+                <div className="text-lg font-bold">{djembesData[0]?.mid_price?.toFixed(2)}</div>
+              </div>
+              <div className="bg-slate-700 rounded p-3">
+                <div className="text-slate-400 text-xs">Final Price</div>
+                <div className="text-lg font-bold">{djembesData[djembesData.length-1]?.mid_price?.toFixed(2)}</div>
+              </div>
+              <div className="bg-slate-700 rounded p-3">
+                <div className="text-slate-400 text-xs">Total Change</div>
+                <div className={`text-lg font-bold ${(djembesData[djembesData.length-1]?.mid_price - djembesData[0]?.mid_price) < 0 ? 'text-red-400' : 'text-green-400'}`}>
+                  {(djembesData[djembesData.length-1]?.mid_price - djembesData[0]?.mid_price).toFixed(2)}
+                </div>
+              </div>
+            </div>
+            <ResponsiveContainer width="100%" height={250}>
+              <LineChart data={djembesData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#475569" />
+                <XAxis dataKey="timestamp" stroke="#94a3b8" />
+                <YAxis stroke="#94a3b8" domain={['dataMin - 10', 'dataMax + 10']} />
+                <Tooltip contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569' }} />
+                <Line type="monotone" dataKey="mid_price" stroke="#8b5cf6" strokeWidth={2} dot={false} name="Price" />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        {/* Normalized Cross-Correlation Analysis - ONLY HERE */}
+        <div className="bg-slate-800 rounded-lg p-4 mb-6 border-4 border-cyan-500">
+          <h2 className="text-2xl font-bold mb-4 text-cyan-400">
+            Normalized Cross-Correlation Analysis: CROISSANTS vs Inverse JAMS
+          </h2>
+          <p className="text-sm text-slate-400 mb-4">
+            Z-score normalized price movements to assess inverse correlation. Overlapping patterns indicate negative correlation.
+          </p>
+          <ResponsiveContainer width="100%" height={600}>
+            <LineChart data={normalizedCroissantsJams}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#475569" />
+              <XAxis dataKey="timestamp" stroke="#94a3b8" />
+              <YAxis 
+                stroke="#94a3b8"
+                label={{ value: 'Standard Deviations from Mean', angle: -90, position: 'insideLeft', style: { fill: '#94a3b8' } }}
+              />
+              <Tooltip 
+                contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569' }}
+                formatter={(value) => value.toFixed(3)}
+              />
+              <Legend wrapperStyle={{ paddingTop: '20px' }} />
+              <ReferenceLine y={0} stroke="#64748b" strokeDasharray="3 3" />
+              <Line 
+                type="monotone" 
+                dataKey="croissants_normalized" 
+                stroke="#06b6d4" 
+                strokeWidth={4} 
+                dot={false} 
+                name="CROISSANTS (Z-score)" 
+              />
+              <Line 
+                type="monotone" 
+                dataKey="jams_inverse_normalized" 
+                stroke="#f97316" 
+                strokeWidth={4} 
+                dot={false} 
+                name="JAMS Inverted (Z-score)" 
+                strokeDasharray="8 4"
+              />
+            </LineChart>
+          </ResponsiveContainer>
+          <div className="mt-4 bg-cyan-900 bg-opacity-30 border border-cyan-400 rounded p-4">
+            <div className="font-bold mb-2 text-lg">Statistical Interpretation:</div>
+            <div className="text-slate-300 space-y-2">
+              <div>• <span className="font-bold">Overlapping series</span> → Strong negative correlation (inverse relationship confirmed)</div>
+              <div>• <span className="font-bold">Diverging series</span> → Low/no correlation</div>
+              <div className="mt-3 pt-3 border-t border-cyan-700">
+                <div>• Both series normalized using z-score transformation: (x - μ) / σ</div>
+                <div>• Y-axis represents standard deviations from respective means</div>
+                <div>• Timestamps synchronized for temporal alignment</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Basket Price Charts */}
+        <div className="space-y-6 mb-6">
+          {/* PICNIC_BASKET1 */}
+          <div className="bg-slate-800 rounded-lg p-4 border-2 border-pink-500">
+            <h2 className="text-xl font-bold mb-4 text-pink-400">PICNIC_BASKET1 Price Movement</h2>
+            <div className="text-sm text-slate-400 mb-4">
+              Formula: 6 × CROISSANTS + 3 × JAMS + 1 × DJEMBES
+            </div>
+            <div className="grid grid-cols-3 gap-4 mb-4">
+              <div className="bg-slate-700 rounded p-3">
+                <div className="text-slate-400 text-xs">Starting Price</div>
+                <div className="text-lg font-bold">{basket1Data[0]?.mid_price?.toFixed(2)}</div>
+              </div>
+              <div className="bg-slate-700 rounded p-3">
+                <div className="text-slate-400 text-xs">Final Price</div>
+                <div className="text-lg font-bold">{basket1Data[basket1Data.length-1]?.mid_price?.toFixed(2)}</div>
+              </div>
+              <div className="bg-slate-700 rounded p-3">
+                <div className="text-slate-400 text-xs">Total Change</div>
+                <div className={`text-lg font-bold ${(basket1Data[basket1Data.length-1]?.mid_price - basket1Data[0]?.mid_price) < 0 ? 'text-red-400' : 'text-green-400'}`}>
+                  {(basket1Data[basket1Data.length-1]?.mid_price - basket1Data[0]?.mid_price).toFixed(2)}
+                </div>
+              </div>
+            </div>
+            <ResponsiveContainer width="100%" height={300}>
+              <LineChart data={basket1Data}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#475569" />
+                <XAxis dataKey="timestamp" stroke="#94a3b8" />
+                <YAxis stroke="#94a3b8" domain={['dataMin - 20', 'dataMax + 20']} />
+                <Tooltip contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569' }} />
+                <Line type="monotone" dataKey="mid_price" stroke="#ec4899" strokeWidth={3} dot={false} name="Basket 1 Price" />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+
+          {/* PICNIC_BASKET2 */}
+          <div className="bg-slate-800 rounded-lg p-4 border-2 border-orange-500">
+            <h2 className="text-xl font-bold mb-4 text-orange-400">PICNIC_BASKET2 Price Movement</h2>
+            <div className="text-sm text-slate-400 mb-4">
+              Formula: 4 × CROISSANTS + 2 × JAMS
+            </div>
+            <div className="grid grid-cols-3 gap-4 mb-4">
+              <div className="bg-slate-700 rounded p-3">
+                <div className="text-slate-400 text-xs">Starting Price</div>
+                <div className="text-lg font-bold">{basket2Data[0]?.mid_price?.toFixed(2)}</div>
+              </div>
+              <div className="bg-slate-700 rounded p-3">
+                <div className="text-slate-400 text-xs">Final Price</div>
+                <div className="text-lg font-bold">{basket2Data[basket2Data.length-1]?.mid_price?.toFixed(2)}</div>
+              </div>
+              <div className="bg-slate-700 rounded p-3">
+                <div className="text-slate-400 text-xs">Total Change</div>
+                <div className={`text-lg font-bold ${(basket2Data[basket2Data.length-1]?.mid_price - basket2Data[0]?.mid_price) < 0 ? 'text-red-400' : 'text-green-400'}`}>
+                  {(basket2Data[basket2Data.length-1]?.mid_price - basket2Data[0]?.mid_price).toFixed(2)}
+                </div>
+              </div>
+            </div>
+            <ResponsiveContainer width="100%" height={300}>
+              <LineChart data={basket2Data}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#475569" />
+                <XAxis dataKey="timestamp" stroke="#94a3b8" />
+                <YAxis stroke="#94a3b8" domain={['dataMin - 10', 'dataMax + 10']} />
+                <Tooltip contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569' }} />
+                <Line type="monotone" dataKey="mid_price" stroke="#f97316" strokeWidth={3} dot={false} name="Basket 2 Price" />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        {/* Summary Statistics */}
+        <div className="bg-blue-900 bg-opacity-20 border border-blue-500 rounded-lg p-4">
+          <h3 className="font-bold mb-3">📊 Summary Statistics</h3>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+            <div>
+              <div className="font-bold text-blue-400 mb-2">Products</div>
+              <div className="space-y-1 text-slate-300">
+                <div>CROISSANTS: {croissantsData.length} ticks</div>
+                <div>JAMS: {jamsData.length} ticks</div>
+                <div>DJEMBES: {djembesData.length} ticks</div>
+              </div>
+            </div>
+            <div>
+              <div className="font-bold text-pink-400 mb-2">Baskets</div>
+              <div className="space-y-1 text-slate-300">
+                <div>BASKET1: {basket1Data.length} ticks</div>
+                <div>BASKET2: {basket2Data.length} ticks</div>
+              </div>
+            </div>
+            <div>
+              <div className="font-bold text-yellow-400 mb-2">Price Changes</div>
+              <div className="space-y-1 text-slate-300">
+                <div>CROISSANTS: {(croissantsData[croissantsData.length-1]?.mid_price - croissantsData[0]?.mid_price).toFixed(2)}</div>
+                <div>JAMS: {(jamsData[jamsData.length-1]?.mid_price - jamsData[0]?.mid_price).toFixed(2)}</div>
+                <div>DJEMBES: {(djembesData[djembesData.length-1]?.mid_price - djembesData[0]?.mid_price).toFixed(2)}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default IMCMarketAnalysis;
