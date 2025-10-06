@@ -1,0 +1,891 @@
+"""
+Visualization and Advanced Analysis for Basket Statistical Arbitrage
+
+This module provides:
+- Comprehensive plotting functions
+- Parameter sensitivity analysis
+- Walk-forward optimization
+- Enhanced regime detection with HMM
+- Change-point detection using PELT
+
+Requirements:
+    pip install matplotlib seaborn ruptures hmmlearn
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from typing import Dict, List, Tuple
+import warnings
+warnings.filterwarnings('ignore')
+
+# Try to import optional dependencies
+try:
+    import ruptures as rpt
+    HAS_RUPTURES = True
+except ImportError:
+    HAS_RUPTURES = False
+    print("Warning: ruptures not installed. Change-point detection unavailable.")
+
+try:
+    from hmmlearn import hmm
+    HAS_HMM = True
+except ImportError:
+    HAS_HMM = False
+    print("Warning: hmmlearn not installed. HMM regime detection unavailable.")
+
+
+# ============================================================================
+# VISUALIZATION FUNCTIONS
+# ============================================================================
+
+def plot_backtest_results(results: Dict, figsize: Tuple = (16, 12)):
+    """
+    Create comprehensive visualization of backtest results.
+    
+    Args:
+        results: Output from backtest() function
+        figsize: Figure size
+    """
+    fig, axes = plt.subplots(4, 2, figsize=figsize)
+    fig.suptitle('Basket Arbitrage Backtest Results', fontsize=16, fontweight='bold')
+    
+    data = results['data']
+    signals = results['signals']
+    cum_pnl = results['cum_pnl']
+    regime = results['regime']
+    
+    # 1. Mispricing Spread S
+    ax = axes[0, 0]
+    ax.plot(data.index, data['S'], label='Spread S', linewidth=1, alpha=0.7)
+    ax.axhline(0, color='red', linestyle='--', alpha=0.5, label='Fair Value')
+    ax.fill_between(data.index, 0, data['S'], alpha=0.2)
+    ax.set_title('Mispricing Spread: S = B1 - (1.5×B2 + D)')
+    ax.set_ylabel('Spread Value')
+    ax.legend()
+    ax.grid(alpha=0.3)
+    
+    # 2. Z-Score with Regime Shading
+    ax = axes[0, 1]
+    ax.plot(signals.index, signals['z_S'], label='Z-score', linewidth=1)
+    
+    # Shade regimes
+    for i in range(len(regime)-1):
+        if regime.iloc[i] == 1:  # Divergence
+            ax.axvspan(regime.index[i], regime.index[i+1], 
+                      alpha=0.2, color='red')
+    
+    config = results['config']
+    ax.axhline(config.z_enter, color='green', linestyle='--', alpha=0.5, label='Entry Threshold')
+    ax.axhline(-config.z_enter, color='green', linestyle='--', alpha=0.5)
+    ax.axhline(config.z_exit, color='orange', linestyle='--', alpha=0.5, label='Exit Threshold')
+    ax.axhline(-config.z_exit, color='orange', linestyle='--', alpha=0.5)
+    ax.set_title('Z-Score with Regime Shading (Red=Divergence)')
+    ax.set_ylabel('Z-Score')
+    ax.legend()
+    ax.grid(alpha=0.3)
+    
+    # 3. Positions
+    ax = axes[1, 0]
+    ax.plot(signals.index, signals['target_position'], 
+            label='Target Position', linewidth=1, drawstyle='steps-post')
+    ax.fill_between(signals.index, 0, signals['target_position'], 
+                    alpha=0.3, step='post')
+    ax.set_title('Target Position (Arb Units)')
+    ax.set_ylabel('Position')
+    ax.legend()
+    ax.grid(alpha=0.3)
+    
+    # 4. Cumulative P&L
+    ax = axes[1, 1]
+    ax.plot(cum_pnl.index, cum_pnl, label='Cumulative P&L', linewidth=2)
+    ax.fill_between(cum_pnl.index, 0, cum_pnl, alpha=0.3)
+    
+    # Mark peak for drawdown
+    peak = cum_pnl.expanding().max()
+    ax.plot(peak.index, peak, 'r--', alpha=0.5, label='Peak')
+    
+    ax.set_title(f"Cumulative P&L (Sharpe: {results['metrics']['sharpe_ratio']:.2f})")
+    ax.set_ylabel('P&L')
+    ax.legend()
+    ax.grid(alpha=0.3)
+    
+    # 5. Drawdown
+    ax = axes[2, 0]
+    peak = cum_pnl.expanding().max()
+    drawdown = (cum_pnl - peak) / peak.abs()
+    ax.fill_between(drawdown.index, 0, drawdown * 100, 
+                    color='red', alpha=0.5)
+    ax.set_title(f"Drawdown (Max: {results['metrics']['max_drawdown']:.2%})")
+    ax.set_ylabel('Drawdown %')
+    ax.grid(alpha=0.3)
+    
+    # 6. Daily Returns Distribution
+    ax = axes[2, 1]
+    daily_returns = results['strategy_pnl']
+    ax.hist(daily_returns, bins=50, alpha=0.7, edgecolor='black')
+    ax.axvline(daily_returns.mean(), color='red', linestyle='--', 
+              label=f'Mean: {daily_returns.mean():.4f}')
+    ax.axvline(0, color='black', linestyle='-', alpha=0.3)
+    ax.set_title('Daily Returns Distribution')
+    ax.set_xlabel('Return')
+    ax.set_ylabel('Frequency')
+    ax.legend()
+    ax.grid(alpha=0.3)
+    
+    # 7. Entry/Exit Points on Z-Score
+    ax = axes[3, 0]
+    ax.plot(signals.index, signals['z_S'], linewidth=1, alpha=0.5, label='Z-Score')
+    
+    entries = signals[signals['entry']]
+    exits = signals[signals['exit']]
+    
+    ax.scatter(entries.index, entries['z_S'], 
+              color='green', marker='^', s=50, label='Entry', zorder=5)
+    ax.scatter(exits.index, exits['z_S'], 
+              color='red', marker='v', s=50, label='Exit', zorder=5)
+    
+    ax.axhline(0, color='black', linestyle='-', alpha=0.3)
+    ax.set_title('Entry/Exit Points')
+    ax.set_ylabel('Z-Score')
+    ax.legend()
+    ax.grid(alpha=0.3)
+    
+    # 8. Performance by Regime
+    ax = axes[3, 1]
+    pnl_by_regime = results['pnl_by_regime']
+    
+    if len(pnl_by_regime) > 0:
+        regimes = ['Correlated', 'Divergence']
+        colors = ['green', 'red']
+        
+        x_pos = np.arange(len(pnl_by_regime))
+        ax.bar(x_pos, pnl_by_regime['sum'], color=colors[:len(pnl_by_regime)], alpha=0.7)
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels([regimes[i] for i in pnl_by_regime.index])
+        ax.set_title('P&L by Regime')
+        ax.set_ylabel('Total P&L')
+        ax.grid(alpha=0.3, axis='y')
+    
+    plt.tight_layout()
+    return fig
+
+
+def plot_component_analysis(results: Dict, figsize: Tuple = (14, 10)):
+    """
+    Plot component relationship analysis.
+    
+    Args:
+        results: Output from backtest() function
+        figsize: Figure size
+    """
+    fig, axes = plt.subplots(3, 2, figsize=figsize)
+    fig.suptitle('Component Relationship Analysis', fontsize=16, fontweight='bold')
+    
+    data = results['data']
+    
+    # 1. CROISSANTS vs JAMS scatter
+    ax = axes[0, 0]
+    ax.scatter(data['J'], data['C'], alpha=0.5, s=10)
+    ax.set_xlabel('JAMS Price')
+    ax.set_ylabel('CROISSANTS Price')
+    ax.set_title('CROISSANTS vs JAMS Relationship')
+    ax.grid(alpha=0.3)
+    
+    # Add regression line
+    z = np.polyfit(data['J'], data['C'], 1)
+    p = np.poly1d(z)
+    ax.plot(data['J'], p(data['J']), "r--", alpha=0.8, label=f'y={z[0]:.2f}x+{z[1]:.1f}')
+    ax.legend()
+    
+    # 2. Time series of both
+    ax = axes[0, 1]
+    ax2 = ax.twinx()
+    
+    ax.plot(data.index, data['C'], 'b-', label='CROISSANTS', alpha=0.7)
+    ax2.plot(data.index, data['J'], 'g-', label='JAMS', alpha=0.7)
+    
+    ax.set_ylabel('CROISSANTS', color='b')
+    ax2.set_ylabel('JAMS', color='g')
+    ax.set_title('Component Prices Over Time')
+    ax.grid(alpha=0.3)
+    
+    # 3. Normalized (z-score) comparison
+    ax = axes[1, 0]
+    c_z = (data['C'] - data['C'].mean()) / data['C'].std()
+    j_z = (data['J'] - data['J'].mean()) / data['J'].std()
+    j_inv_z = -j_z
+    
+    ax.plot(data.index, c_z, label='CROISSANTS (normalized)', linewidth=1)
+    ax.plot(data.index, j_inv_z, label='JAMS Inverted (normalized)', 
+           linewidth=1, linestyle='--')
+    ax.axhline(0, color='black', linestyle='-', alpha=0.3)
+    ax.set_title('Normalized Cross-Correlation (Testing Inverse Relationship)')
+    ax.set_ylabel('Z-Score')
+    ax.legend()
+    ax.grid(alpha=0.3)
+    
+    # 4. Rolling correlation
+    ax = axes[1, 1]
+    rolling_corr = data['C'].rolling(50).corr(data['J'])
+    ax.plot(data.index, rolling_corr, label='50-bar Rolling Correlation')
+    ax.axhline(0, color='red', linestyle='--', alpha=0.5)
+    ax.axhline(-0.5, color='green', linestyle='--', alpha=0.5, label='Strong Inverse')
+    ax.fill_between(data.index, -1, 0, alpha=0.1, color='green')
+    ax.set_title('Rolling Correlation (C vs J)')
+    ax.set_ylabel('Correlation')
+    ax.set_ylim(-1, 1)
+    ax.legend()
+    ax.grid(alpha=0.3)
+    
+    # 5. Basket composition
+    ax = axes[2, 0]
+    basket_components = pd.DataFrame({
+        'B1_from_C': 6 * data['C'],
+        'B1_from_J': 3 * data['J'],
+        'B1_from_D': 1 * data['D']
+    })
+    
+    ax.plot(data.index, basket_components['B1_from_C'], label='6×C', alpha=0.7)
+    ax.plot(data.index, basket_components['B1_from_J'], label='3×J', alpha=0.7)
+    ax.plot(data.index, basket_components['B1_from_D'], label='1×D', alpha=0.7)
+    ax.set_title('BASKET1 Component Contributions')
+    ax.set_ylabel('Value')
+    ax.legend()
+    ax.grid(alpha=0.3)
+    
+    # 6. Spread decomposition
+    ax = axes[2, 1]
+    ax.plot(data.index, data['S'], label='Total Spread S', linewidth=2)
+    ax.axhline(0, color='red', linestyle='--', alpha=0.5)
+    ax.fill_between(data.index, 0, data['S'], alpha=0.3)
+    
+    # Add statistics
+    s_mean = data['S'].mean()
+    s_std = data['S'].std()
+    ax.axhline(s_mean, color='blue', linestyle='--', alpha=0.5, 
+              label=f'Mean: {s_mean:.2f}')
+    ax.axhline(s_mean + s_std, color='orange', linestyle=':', alpha=0.5)
+    ax.axhline(s_mean - s_std, color='orange', linestyle=':', alpha=0.5, 
+              label=f'±1 Std: {s_std:.2f}')
+    
+    ax.set_title('Mispricing Spread with Statistics')
+    ax.set_ylabel('Spread Value')
+    ax.legend()
+    ax.grid(alpha=0.3)
+    
+    plt.tight_layout()
+    return fig
+
+
+# ============================================================================
+# PARAMETER SENSITIVITY ANALYSIS
+# ============================================================================
+
+def parameter_sensitivity_analysis(
+    prices_df: pd.DataFrame,
+    base_config: 'BacktestConfig',
+    param_name: str,
+    param_values: List,
+    backtest_func
+) -> pd.DataFrame:
+    """
+    Analyze sensitivity to a single parameter.
+    
+    Args:
+        prices_df: Price data
+        base_config: Base configuration
+        param_name: Parameter to vary
+        param_values: List of values to test
+        backtest_func: Backtest function
+    
+    Returns:
+        DataFrame with results for each parameter value
+    """
+    results_list = []
+    
+    for val in param_values:
+        config = base_config.__class__(**base_config.__dict__)
+        setattr(config, param_name, val)
+        
+        try:
+            result = backtest_func(prices_df, config)
+            
+            results_list.append({
+                param_name: val,
+                'total_return': result['metrics']['total_return'],
+                'sharpe_ratio': result['metrics']['sharpe_ratio'],
+                'max_drawdown': result['metrics']['max_drawdown'],
+                'win_rate': result['metrics']['win_rate'],
+                'total_trades': result['metrics']['total_trades']
+            })
+        except Exception as e:
+            print(f"Error with {param_name}={val}: {e}")
+            continue
+    
+    return pd.DataFrame(results_list)
+
+
+def plot_parameter_sensitivity(
+    sensitivity_df: pd.DataFrame,
+    param_name: str,
+    figsize: Tuple = (12, 8)
+):
+    """
+    Visualize parameter sensitivity analysis.
+    
+    Args:
+        sensitivity_df: Output from parameter_sensitivity_analysis
+        param_name: Name of parameter being analyzed
+        figsize: Figure size
+    """
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+    fig.suptitle(f'Sensitivity Analysis: {param_name}', fontsize=14, fontweight='bold')
+    
+    # 1. Total Return
+    ax = axes[0, 0]
+    ax.plot(sensitivity_df[param_name], sensitivity_df['total_return'], 
+           marker='o', linewidth=2)
+    ax.set_xlabel(param_name)
+    ax.set_ylabel('Total Return')
+    ax.set_title('Total Return vs Parameter')
+    ax.grid(alpha=0.3)
+    
+    # 2. Sharpe Ratio
+    ax = axes[0, 1]
+    ax.plot(sensitivity_df[param_name], sensitivity_df['sharpe_ratio'], 
+           marker='o', linewidth=2, color='green')
+    ax.set_xlabel(param_name)
+    ax.set_ylabel('Sharpe Ratio')
+    ax.set_title('Sharpe Ratio vs Parameter')
+    ax.grid(alpha=0.3)
+    
+    # 3. Max Drawdown
+    ax = axes[1, 0]
+    ax.plot(sensitivity_df[param_name], sensitivity_df['max_drawdown'] * 100, 
+           marker='o', linewidth=2, color='red')
+    ax.set_xlabel(param_name)
+    ax.set_ylabel('Max Drawdown %')
+    ax.set_title('Max Drawdown vs Parameter')
+    ax.grid(alpha=0.3)
+    
+    # 4. Number of Trades
+    ax = axes[1, 1]
+    ax.bar(sensitivity_df[param_name], sensitivity_df['total_trades'], alpha=0.7)
+    ax.set_xlabel(param_name)
+    ax.set_ylabel('Number of Trades')
+    ax.set_title('Total Trades vs Parameter')
+    ax.grid(alpha=0.3, axis='y')
+    
+    plt.tight_layout()
+    return fig
+
+
+def run_parameter_sweep(
+    prices_df: pd.DataFrame,
+    base_config: 'BacktestConfig',
+    backtest_func,
+    param_grid: Dict[str, List]
+) -> pd.DataFrame:
+    """
+    Run comprehensive parameter sweep across multiple parameters.
+    
+    Args:
+        prices_df: Price data
+        base_config: Base configuration
+        backtest_func: Backtest function
+        param_grid: Dictionary mapping param names to lists of values
+    
+    Returns:
+        DataFrame with all combinations and results
+    """
+    from itertools import product
+    
+    param_names = list(param_grid.keys())
+    param_values = list(param_grid.values())
+    
+    results_list = []
+    
+    for combo in product(*param_values):
+        config = base_config.__class__(**base_config.__dict__)
+        
+        params_dict = dict(zip(param_names, combo))
+        for param_name, val in params_dict.items():
+            setattr(config, param_name, val)
+        
+        try:
+            result = backtest_func(prices_df, config)
+            
+            row = params_dict.copy()
+            row.update({
+                'total_return': result['metrics']['total_return'],
+                'sharpe_ratio': result['metrics']['sharpe_ratio'],
+                'max_drawdown': result['metrics']['max_drawdown'],
+                'win_rate': result['metrics']['win_rate'],
+                'total_trades': result['metrics']['total_trades']
+            })
+            results_list.append(row)
+        except Exception as e:
+            print(f"Error with {params_dict}: {e}")
+            continue
+    
+    return pd.DataFrame(results_list)
+
+
+def plot_parameter_heatmap(
+    sweep_df: pd.DataFrame,
+    param1: str,
+    param2: str,
+    metric: str = 'sharpe_ratio',
+    figsize: Tuple = (10, 8)
+):
+    """
+    Create heatmap for two-parameter sensitivity.
+    
+    Args:
+        sweep_df: Output from run_parameter_sweep
+        param1: First parameter name
+        param2: Second parameter name
+        metric: Metric to display
+        figsize: Figure size
+    """
+    pivot_table = sweep_df.pivot_table(
+        values=metric,
+        index=param2,
+        columns=param1,
+        aggfunc='mean'
+    )
+    
+    fig, ax = plt.subplots(figsize=figsize)
+    sns.heatmap(pivot_table, annot=True, fmt='.2f', cmap='RdYlGn', 
+               center=0, ax=ax, cbar_kws={'label': metric})
+    ax.set_title(f'{metric} Heatmap: {param1} vs {param2}')
+    plt.tight_layout()
+    return fig
+
+
+# ============================================================================
+# CHANGE-POINT DETECTION
+# ============================================================================
+
+def detect_change_points(
+    x: pd.Series,
+    method: str = 'pelt',
+    min_size: int = 10,
+    penalty: float = 3.0
+) -> List[int]:
+    """
+    Detect change points using PELT or Binary Segmentation.
+    
+    Args:
+        x: Time series
+        method: 'pelt' or 'binseg'
+        min_size: Minimum segment size
+        penalty: Penalty value (higher = fewer change points)
+    
+    Returns:
+        List of change point indices
+    """
+    if not HAS_RUPTURES:
+        print("ruptures library not available")
+        return []
+    
+    x_clean = x.dropna().values
+    
+    if method == 'pelt':
+        algo = rpt.Pelt(model='rbf', min_size=min_size).fit(x_clean)
+        change_points = algo.predict(pen=penalty)
+    elif method == 'binseg':
+        algo = rpt.Binseg(model='l2', min_size=min_size).fit(x_clean)
+        change_points = algo.predict(n_bkps=10)
+    else:
+        raise ValueError(f"Unknown method: {method}")
+    
+    # Convert to original index
+    valid_indices = x.dropna().index
+    change_point_indices = [valid_indices[i] for i in change_points[:-1]]
+    
+    return change_point_indices
+
+
+def plot_change_points(
+    x: pd.Series,
+    change_points: List,
+    title: str = "Change Point Detection",
+    figsize: Tuple = (14, 6)
+):
+    """
+    Visualize detected change points.
+    
+    Args:
+        x: Time series
+        change_points: List of change point indices
+        title: Plot title
+        figsize: Figure size
+    """
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    ax.plot(x.index, x, linewidth=1, label='Signal')
+    
+    for cp in change_points:
+        ax.axvline(cp, color='red', linestyle='--', alpha=0.7)
+    
+    ax.set_title(title)
+    ax.set_ylabel('Value')
+    ax.legend()
+    ax.grid(alpha=0.3)
+    
+    plt.tight_layout()
+    return fig
+
+
+# ============================================================================
+# HMM-BASED REGIME DETECTION
+# ============================================================================
+
+def classify_regime_hmm(
+    features: pd.DataFrame,
+    n_states: int = 2,
+    n_iter: int = 100
+) -> Tuple[pd.Series, object]:
+    """
+    Classify regimes using Gaussian HMM.
+    
+    Args:
+        features: DataFrame with standardized features
+        n_states: Number of hidden states
+        n_iter: Maximum iterations for EM algorithm
+    
+    Returns:
+        regime_series: State sequence
+        model: Fitted HMM model
+    """
+    if not HAS_HMM:
+        print("hmmlearn library not available")
+        return pd.Series(0, index=features.index), None
+    
+    # Clean features
+    features_clean = features.dropna()
+    
+    # Fit HMM
+    model = hmm.GaussianHMM(
+        n_components=n_states,
+        covariance_type='full',
+        n_iter=n_iter,
+        random_state=42
+    )
+    
+    model.fit(features_clean.values)
+    states = model.predict(features_clean.values)
+    
+    # Map back to full index
+    regime_series = pd.Series(0, index=features.index)
+    regime_series.loc[features_clean.index] = states
+    
+    # Label states: state with higher mean feature[0] is "Divergence"
+    state_means = [features_clean[states == i].mean().mean() for i in range(n_states)]
+    if state_means[1] > state_means[0]:
+        regime_series = regime_series.replace({0: 1, 1: 0})
+    
+    return regime_series, model
+
+
+# ============================================================================
+# DIVERGENCE PERIOD ANALYSIS
+# ============================================================================
+
+def analyze_divergence_periods(
+    prices_df: pd.DataFrame,
+    config: 'BacktestConfig',
+    return_detailed: bool = True
+) -> Dict:
+    """
+    Comprehensively analyze divergence periods using multiple methods.
+    
+    This function identifies when the CROISSANTS-JAMS inverse relationship
+    breaks down using:
+    1. Regime detection (correlation breakdown)
+    2. Change point detection (structural breaks)
+    3. Distance metric spikes
+    
+    Args:
+        prices_df: DataFrame with C, J, D columns
+        config: BacktestConfig for regime detection parameters
+        return_detailed: If True, return full DataFrames
+    
+    Returns:
+        Dictionary with:
+        - divergence_periods: List of (start, end) tuples
+        - change_points: List of change point indices
+        - regime_series: Full regime time series
+        - summary_stats: Statistics about divergences
+    """
+    from basket_stat_arb import (
+        build_baskets_and_spread,
+        fit_pair_model_rolling_ols,
+        rolling_corr_and_fisher,
+        compute_ewma_zscore,
+        distance_metrics,
+        classify_regime_rules
+    )
+    
+    # Build baskets
+    df = build_baskets_and_spread(prices_df)
+    
+    # Get regime detection features
+    corr_df = rolling_corr_and_fisher(
+        df['C'], df['J'], 
+        window=config.rolling_window,
+        alpha=config.fisher_alpha
+    )
+    
+    # Normalized series
+    c_z = compute_ewma_zscore(df['C'], halflife=config.halflife_mu)
+    j_z = compute_ewma_zscore(df['J'], halflife=config.halflife_mu)
+    j_inv_z = -j_z
+    dist = distance_metrics(c_z, j_inv_z, window=config.rolling_window)
+    
+    # Component model
+    residuals, betas = fit_pair_model_rolling_ols(
+        df['C'], df['J'], 
+        window=config.rolling_window
+    )
+    residual_z = compute_ewma_zscore(residuals, halflife=config.halflife_sigma)
+    
+    # Detect regimes
+    regime = classify_regime_rules(
+        corr_df, residual_z, dist, 
+        hysteresis=config.hysteresis_bars
+    )
+    
+    # Extract divergence periods
+    divergence_periods = []
+    in_divergence = False
+    start_idx = None
+    
+    for i in range(len(regime)):
+        if regime.iloc[i] == 1 and not in_divergence:
+            start_idx = regime.index[i]
+            in_divergence = True
+        elif regime.iloc[i] == 0 and in_divergence:
+            end_idx = regime.index[i-1]
+            divergence_periods.append((start_idx, end_idx))
+            in_divergence = False
+    
+    # Handle case where we end in divergence
+    if in_divergence:
+        divergence_periods.append((start_idx, regime.index[-1]))
+    
+    # Detect change points
+    change_points = detect_change_points(
+        df['S'],
+        method='pelt',
+        penalty=10.0
+    ) if HAS_RUPTURES else []
+    
+    # Calculate statistics
+    total_bars = len(regime)
+    divergence_bars = (regime == 1).sum()
+    divergence_pct = divergence_bars / total_bars * 100
+    
+    avg_divergence_duration = np.mean([end - start for start, end in divergence_periods]) if divergence_periods else 0
+    
+    summary_stats = {
+        'total_periods': len(divergence_periods),
+        'total_bars': total_bars,
+        'divergence_bars': divergence_bars,
+        'divergence_pct': divergence_pct,
+        'avg_duration': avg_divergence_duration,
+        'change_points_count': len(change_points)
+    }
+    
+    result = {
+        'divergence_periods': divergence_periods,
+        'change_points': change_points,
+        'summary_stats': summary_stats
+    }
+    
+    if return_detailed:
+        result['regime_series'] = regime
+        result['correlation_df'] = corr_df
+        result['distance'] = dist
+        result['residual_z'] = residual_z
+        result['spread'] = df['S']
+    
+    return result
+
+
+def print_divergence_report(analysis_results: Dict):
+    """
+    Print formatted report of divergence analysis.
+    
+    Args:
+        analysis_results: Output from analyze_divergence_periods()
+    """
+    stats = analysis_results['summary_stats']
+    periods = analysis_results['divergence_periods']
+    change_points = analysis_results['change_points']
+    
+    print("=" * 80)
+    print("DIVERGENCE PERIOD ANALYSIS")
+    print("=" * 80)
+    
+    print(f"\nTotal divergence periods detected: {stats['total_periods']}")
+    print(f"Total bars in dataset: {stats['total_bars']}")
+    print(f"Bars in divergence: {stats['divergence_bars']} ({stats['divergence_pct']:.1f}%)")
+    print(f"Average divergence duration: {stats['avg_duration']:.1f} bars")
+    
+    print(f"\n--- Detected Divergence Periods ---")
+    for i, (start, end) in enumerate(periods, 1):
+        duration = end - start
+        print(f"Period {i}: Timestamps {start:6d} to {end:6d} (duration: {duration:4d} bars)")
+    
+    print(f"\n--- Change Points (Structural Breaks) ---")
+    print(f"Total change points detected: {stats['change_points_count']}")
+    if change_points:
+        print(f"Change point timestamps: {change_points}")
+    
+    print("\n" + "=" * 80)
+    print("INTERPRETATION:")
+    print("- Divergence periods show when the C-J inverse relationship broke down")
+    print("- These are detected algorithmically using statistical criteria:")
+    print("    * Correlation confidence intervals crossing zero")
+    print("    * High residual volatility (component hedge unstable)")
+    print("    * Large Euclidean distance between normalized series")
+    print("- Change points mark structural breaks in the spread")
+    print("- During divergence: reduce positions or widen entry thresholds")
+    print("=" * 80)
+
+
+def plot_divergence_analysis(
+    analysis_results: Dict,
+    figsize: Tuple = (16, 10)
+):
+    """
+    Comprehensive visualization of divergence analysis.
+    
+    Args:
+        analysis_results: Output from analyze_divergence_periods()
+        figsize: Figure size
+    """
+    fig, axes = plt.subplots(3, 2, figsize=figsize)
+    fig.suptitle('Divergence Period Analysis', fontsize=16, fontweight='bold')
+    
+    regime = analysis_results['regime_series']
+    spread = analysis_results['spread']
+    corr_df = analysis_results['correlation_df']
+    distance = analysis_results['distance']
+    residual_z = analysis_results['residual_z']
+    divergence_periods = analysis_results['divergence_periods']
+    change_points = analysis_results['change_points']
+    
+    # Helper function to shade divergences
+    def shade_divergences(ax):
+        for start, end in divergence_periods:
+            ax.axvspan(start, end, alpha=0.2, color='red')
+    
+    # 1. Spread with divergence shading
+    ax = axes[0, 0]
+    ax.plot(spread.index, spread, linewidth=1, label='Spread S')
+    shade_divergences(ax)
+    ax.axhline(0, color='black', linestyle='--', alpha=0.5)
+    for cp in change_points:
+        ax.axvline(cp, color='orange', linestyle='--', alpha=0.5)
+    ax.set_title('Spread with Divergence Periods (Red) & Change Points (Orange)')
+    ax.set_ylabel('Spread S')
+    ax.legend()
+    ax.grid(alpha=0.3)
+    
+    # 2. Regime series
+    ax = axes[0, 1]
+    ax.fill_between(regime.index, 0, regime, alpha=0.5, color='red', 
+                    step='post', label='Regime (0=Corr, 1=Div)')
+    ax.set_title('Regime Time Series')
+    ax.set_ylabel('Regime State')
+    ax.set_ylim(-0.1, 1.1)
+    ax.legend()
+    ax.grid(alpha=0.3)
+    
+    # 3. Rolling correlation with CI
+    ax = axes[1, 0]
+    ax.plot(corr_df.index, corr_df['corr'], label='Correlation', linewidth=1)
+    ax.fill_between(corr_df.index, corr_df['ci_low'], corr_df['ci_high'], 
+                    alpha=0.3, label='95% CI')
+    shade_divergences(ax)
+    ax.axhline(0, color='black', linestyle='--', alpha=0.5)
+    ax.axhline(-0.5, color='green', linestyle=':', alpha=0.5, label='Strong Inverse')
+    ax.set_title('Rolling Correlation with Fisher CI')
+    ax.set_ylabel('Correlation')
+    ax.set_ylim(-1, 1)
+    ax.legend()
+    ax.grid(alpha=0.3)
+    
+    # 4. Euclidean distance
+    ax = axes[1, 1]
+    ax.plot(distance.index, distance, linewidth=1, label='Distance', color='purple')
+    shade_divergences(ax)
+    threshold = distance.quantile(0.80)
+    ax.axhline(threshold, color='red', linestyle='--', alpha=0.5, 
+              label=f'80th percentile: {threshold:.2f}')
+    ax.set_title('Euclidean Distance (Normalized C vs Inverted J)')
+    ax.set_ylabel('Distance')
+    ax.legend()
+    ax.grid(alpha=0.3)
+    
+    # 5. Residual z-score
+    ax = axes[2, 0]
+    ax.plot(residual_z.index, residual_z, linewidth=1, label='Residual Z-score', color='brown')
+    shade_divergences(ax)
+    ax.axhline(2.5, color='red', linestyle='--', alpha=0.5, label='±2.5σ threshold')
+    ax.axhline(-2.5, color='red', linestyle='--', alpha=0.5)
+    ax.axhline(0, color='black', linestyle='-', alpha=0.3)
+    ax.set_title('Component Residual Z-Score')
+    ax.set_ylabel('Z-Score')
+    ax.legend()
+    ax.grid(alpha=0.3)
+    
+    # 6. Summary statistics
+    ax = axes[2, 1]
+    ax.axis('off')
+    
+    stats = analysis_results['summary_stats']
+    summary_text = f"""
+    SUMMARY STATISTICS
+    
+    Total Divergence Periods: {stats['total_periods']}
+    
+    Time in Divergence: {stats['divergence_pct']:.1f}%
+    ({stats['divergence_bars']} / {stats['total_bars']} bars)
+    
+    Avg Divergence Duration: {stats['avg_duration']:.1f} bars
+    
+    Change Points Detected: {stats['change_points_count']}
+    
+    DETECTION CRITERIA:
+    • Correlation CI crosses zero
+    • Residual |z| > 2.5
+    • Distance > 80th percentile
+    • Hysteresis: 5 bars
+    """
+    
+    ax.text(0.1, 0.5, summary_text, fontsize=11, verticalalignment='center',
+           family='monospace', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    plt.tight_layout()
+    return fig
+
+
+# ============================================================================
+# EXAMPLE USAGE
+# ============================================================================
+
+if __name__ == "__main__":
+    print("Visualization and advanced analysis module loaded.")
+    print("\nAvailable functions:")
+    print("  - plot_backtest_results()")
+    print("  - plot_component_analysis()")
+    print("  - parameter_sensitivity_analysis()")
+    print("  - run_parameter_sweep()")
+    print("  - detect_change_points()")
+    print("  - classify_regime_hmm()")
