@@ -338,35 +338,131 @@ fig = plot_parameter_heatmap(
 plt.show()
 ```
 
-### Example 6: Change Point Detection
+### Example 6: Comprehensive Divergence Analysis (Recommended)
+
+```python
+from basket_arb_viz import (
+    analyze_divergence_periods,
+    print_divergence_report,
+    plot_divergence_analysis
+)
+
+# Run comprehensive divergence analysis
+analysis = analyze_divergence_periods(
+    prices,
+    config,
+    return_detailed=True
+)
+
+# Print detailed report
+print_divergence_report(analysis)
+
+# Visualize all detection methods
+fig = plot_divergence_analysis(analysis)
+plt.show()
+
+# Access specific results
+divergence_periods = analysis['divergence_periods']
+print(f"\nDivergence periods: {divergence_periods}")
+
+# Example: Check if a specific timestamp is in divergence
+timestamp_to_check = 12000
+regime = analysis['regime_series']
+if timestamp_to_check in regime.index:
+    is_divergence = regime.loc[timestamp_to_check] == 1
+    print(f"Timestamp {timestamp_to_check}: {'DIVERGENCE' if is_divergence else 'CORRELATED'}")
+```
+
+This comprehensive function:
+- Detects divergence periods using multiple statistical criteria
+- Identifies structural breaks with change-point detection
+- Provides detailed timing and duration of each divergence
+- Validates detection quality across multiple methods
+- **Use this to verify your visual observations algorithmically**
+
+### Example 7: Detect Actual Divergence Points (Alternative Manual Method)
 
 ```python
 from basket_arb_viz import detect_change_points, plot_change_points
+from basket_stat_arb import (
+    rolling_corr_and_fisher,
+    compute_ewma_zscore,
+    distance_metrics,
+    classify_regime_rules
+)
 
 # Build baskets
 df = build_baskets_and_spread(prices)
 
-# Detect change points in spread
+# Get regime detection features
+corr_df = rolling_corr_and_fisher(df['C'], df['J'], window=50)
+c_z = compute_ewma_zscore(df['C'], halflife=50)
+j_z = compute_ewma_zscore(df['J'], halflife=50)
+j_inv_z = -j_z
+dist = distance_metrics(c_z, j_inv_z, window=50)
+
+# Fit component model
+residuals, betas = fit_pair_model_rolling_ols(df['C'], df['J'], window=50)
+residual_z = compute_ewma_zscore(residuals, halflife=50)
+
+# Detect regimes
+regime = classify_regime_rules(corr_df, residual_z, dist, hysteresis=5)
+
+# Find divergence periods (regime == 1)
+divergence_periods = []
+in_divergence = False
+start_idx = None
+
+for i in range(len(regime)):
+    if regime.iloc[i] == 1 and not in_divergence:
+        # Start of divergence
+        start_idx = regime.index[i]
+        in_divergence = True
+    elif regime.iloc[i] == 0 and in_divergence:
+        # End of divergence
+        end_idx = regime.index[i-1]
+        divergence_periods.append((start_idx, end_idx))
+        in_divergence = False
+
+print(f"Detected {len(divergence_periods)} divergence periods:")
+for i, (start, end) in enumerate(divergence_periods):
+    duration = end - start
+    print(f"  Period {i+1}: timestamps {start} to {end} (duration: {duration})")
+
+# Detect change points in spread for validation
 change_points = detect_change_points(
     df['S'],
     method='pelt',
     penalty=10.0
 )
 
-print(f"Detected {len(change_points)} change points")
+print(f"\nDetected {len(change_points)} change points in spread:")
 print(f"Change point timestamps: {change_points}")
 
-# Visualize
-fig = plot_change_points(
-    df['S'],
-    change_points,
-    title="Change Points in Mispricing Spread"
-)
+# Visualize divergence periods
+fig, ax = plt.subplots(figsize=(14, 6))
+ax.plot(df.index, df['S'], label='Spread S', alpha=0.7)
+
+# Shade divergence periods
+for start, end in divergence_periods:
+    ax.axvspan(start, end, alpha=0.3, color='red', label='Divergence' if start == divergence_periods[0][0] else '')
+
+# Mark change points
+for cp in change_points:
+    ax.axvline(cp, color='orange', linestyle='--', alpha=0.7, 
+               label='Change Point' if cp == change_points[0] else '')
+
+ax.set_title('Algorithmically Detected Divergence Periods and Change Points')
+ax.set_ylabel('Spread S')
+ax.legend()
+ax.grid(alpha=0.3)
 plt.show()
 
-# Check if your observed divergences align
-print("\nYour observed divergences were at ~12804 and ~16666")
-print("Do detected change points align with these?")
+print("\nInterpretation:")
+print("- Red shaded areas show when the statistical regime detector flagged divergence")
+print("- Orange dashed lines show structural breaks detected by PELT algorithm")
+print("- These are based on quantitative criteria, not visual inspection")
+```
 ```
 
 ### Example 7: HMM Regime Detection
@@ -637,15 +733,26 @@ plt.show()
 ### Problem: Regime detection not working
 
 **Check**:
-1. Divergences not captured
-2. False regime switches
+1. Divergences not being captured algorithmically
+2. False regime switches (too sensitive)
 3. Hysteresis too low/high
+4. Visual divergences don't align with detected regimes
 
 **Fix**:
+- Validate with change-point detection (Example 6)
 - Try HMM instead of rules
-- Adjust rolling window
-- Tune hysteresis parameter
-- Add more features (distance, residual vol, change points)
+- Adjust rolling window (shorter = more sensitive)
+- Tune hysteresis parameter (higher = less switching)
+- Lower Fisher alpha (more conservative CI)
+- Check distance threshold (may need tuning)
+- Compare multiple detection methods
+
+**To Validate**:
+```python
+# Run the divergence detection example (Example 6)
+# Compare detected periods with visual inspection
+# Adjust parameters if misalignment is systematic
+```
 
 ---
 
@@ -654,11 +761,12 @@ plt.show()
 1. **Load your actual data** from IMC Prosperity 3 Round 2
 2. **Run mean reversion tests** on spread S
 3. **Backtest with default parameters** to get baseline
-4. **Analyze divergence periods** at timestamps ~12804 and ~16666
-5. **Tune parameters** using sensitivity analysis
-6. **Validate regime detection** aligns with observed divergences
-7. **Walk-forward test** if you have enough data
-8. **Generate trading signals** for live/paper trading
+4. **Run divergence detection** (Example 6) to algorithmically identify regime breaks
+5. **Validate detection quality**: Do detected divergences align with your visual observations?
+6. **Tune regime parameters** if needed (rolling window, hysteresis, Fisher alpha)
+7. **Tune entry/exit thresholds** using sensitivity analysis
+8. **Walk-forward test** if you have enough data
+9. **Generate trading signals** for live/paper trading
 
 ---
 
