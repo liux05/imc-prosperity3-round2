@@ -1,0 +1,196 @@
+"""
+==================================================================================
+BACKTEST IMPLEMENTATION - Basket Arbitrage Strategy
+Based on optimized percentile-based entry strategy
+==================================================================================
+"""
+
+import pandas as pd
+import numpy as np
+
+# ============================================================================
+# LOAD DATA
+# ============================================================================
+
+url = 'https://raw.githubusercontent.com/liux05/imc-prosperity3-round2-data/refs/heads/main/apexoa.csv'
+df_long = pd.read_csv(url)
+
+prices_all = df_long.pivot_table(
+    values='mid_price',
+    index='timestamp',
+    columns='product'
+)
+
+prices = pd.DataFrame(index=prices_all.index)
+prices['C'] = prices_all['CROISSANTS']
+prices['J'] = prices_all['JAMS']
+prices['D'] = prices_all['DJEMBES']
+prices['B1_market'] = prices_all['PICNIC_BASKET1']
+prices['B2_market'] = prices_all['PICNIC_BASKET2']
+
+# Calculate theoretical value and demeaned spread
+prices['B1_theo'] = 6 * prices['C'] + 3 * prices['J'] + 1 * prices['D']
+prices['S_raw'] = prices['B1_market'] - prices['B1_theo']
+prices['S'] = prices['S_raw'] - prices['S_raw'].rolling(200, min_periods=1).mean()
+
+print(f"✓ Loaded {len(prices)} rows of data")
+
+# ============================================================================
+# STRATEGY PARAMETERS (OPTIMIZED)
+# ============================================================================
+
+# Percentile-based entry (trades only extreme mispricings)
+ENTER_PERCENTILE = 10  # Enter when spread in top/bottom 10%
+EXIT_PERCENTILE = 45   # Exit when spread moves back toward center
+
+# Position sizing
+BUY_LIQUIDITY = 1      # Max units to buy per timestamp
+SELL_LIQUIDITY = 1     # Max units to sell per timestamp
+
+# Calculate entry/exit thresholds
+upper_entry = np.percentile(prices['S'], 100 - ENTER_PERCENTILE)
+lower_entry = np.percentile(prices['S'], ENTER_PERCENTILE)
+upper_exit = np.percentile(prices['S'], 100 - EXIT_PERCENTILE)
+lower_exit = np.percentile(prices['S'], EXIT_PERCENTILE)
+
+print(f"\nStrategy Thresholds:")
+print(f"  Enter LONG when spread <= {lower_entry:.2f}")
+print(f"  Enter SHORT when spread >= {upper_entry:.2f}")
+print(f"  Exit LONG when spread >= {upper_exit:.2f}")
+print(f"  Exit SHORT when spread <= {lower_exit:.2f}")
+
+# ============================================================================
+# BACKTEST WITH POSITION SIZING
+# ============================================================================
+
+# Initialize tracking
+capital = 0.0  # Start with $0, can go negative
+position = 0   # Current basket position (can be + or -)
+trades = []
+cash_flows = []
+
+for i in range(len(prices)):
+    timestamp = prices.index[i]
+    spread = prices['S'].iloc[i]
+    basket_price = prices['B1_market'].iloc[i]
+    
+    # Determine action based on spread and current position
+    action = None
+    units = 0
+    
+    if position == 0:  # Flat - look for entry
+        if spread <= lower_entry:
+            # Spread too negative - basket underpriced - BUY
+            action = 'BUY'
+            units = min(BUY_LIQUIDITY, BUY_LIQUIDITY)  # Respect liquidity
+            position += units
+            capital -= units * basket_price  # Pay for basket
+            
+        elif spread >= upper_entry:
+            # Spread too positive - basket overpriced - SELL
+            action = 'SELL'
+            units = min(SELL_LIQUIDITY, SELL_LIQUIDITY)
+            position -= units
+            capital += units * basket_price  # Receive cash from sale
+    
+    elif position > 0:  # Long position - look for exit
+        if spread >= upper_exit:
+            # Mean reversion - close long
+            action = 'SELL'
+            units = position
+            capital += units * basket_price  # Sell baskets
+            position = 0
+    
+    elif position < 0:  # Short position - look for exit
+        if spread <= lower_exit:
+            # Mean reversion - close short
+            action = 'BUY'
+            units = abs(position)
+            capital -= units * basket_price  # Buy back baskets
+            position = 0
+    
+    # Record trades
+    if action:
+        trades.append({
+            'timestamp': timestamp,
+            'action': action,
+            'units': units,
+            'price': basket_price,
+            'spread': spread,
+            'position_after': position
+        })
+        
+        cash_flows.append({
+            'timestamp': timestamp,
+            'cash_flow': -units * basket_price if action == 'BUY' else units * basket_price,
+            'capital': capital
+        })
+
+# ============================================================================
+# FINAL POSITION LIQUIDATION
+# ============================================================================
+
+# At end of day, liquidate all positions at last market price
+final_price = prices['B1_market'].iloc[-1]
+if position != 0:
+    liquidation_value = position * final_price
+    capital += liquidation_value
+    
+    trades.append({
+        'timestamp': prices.index[-1],
+        'action': 'LIQUIDATE',
+        'units': abs(position),
+        'price': final_price,
+        'spread': prices['S'].iloc[-1],
+        'position_after': 0
+    })
+
+# ============================================================================
+# RESULTS
+# ============================================================================
+
+trades_df = pd.DataFrame(trades)
+
+print("\n" + "="*70)
+print("BACKTEST RESULTS")
+print("="*70)
+print(f"Final Capital (P&L):  ${capital:,.2f}")
+print(f"Total Trades:         {len(trades)}")
+print(f"Entry Trades:         {len([t for t in trades if t['action'] in ['BUY', 'SELL'] and t['timestamp'] != prices.index[-1]])}")
+print(f"Exit Trades:          {len([t for t in trades if t['action'] in ['BUY', 'SELL'] and t['timestamp'] != prices.index[-1]])}")
+
+# Show first 10 and last 10 trades
+print("\n--- First 10 Trades ---")
+print(trades_df.head(10).to_string(index=False))
+
+print("\n--- Last 10 Trades ---")
+print(trades_df.tail(10).to_string(index=False))
+
+print("\n" + "="*70)
+print("STRATEGY SUMMARY")
+print("="*70)
+print(f"✓ Position sizing: Buy up to {BUY_LIQUIDITY}, Sell up to {SELL_LIQUIDITY}")
+print(f"✓ Started with $0, can go infinitely negative")
+print(f"✓ Final positions liquidated at last market price")
+print(f"✓ Entry strategy: Percentile-based (top/bottom {ENTER_PERCENTILE}%)")
+print(f"✓ Exit strategy: Mean reversion to {EXIT_PERCENTILE}th percentile")
+print(f"✓ No position caps applied (honor system)")
+print("="*70)
+
+# Export trades to CSV
+trades_df.to_csv('backtest_trades.csv', index=False)
+print("\n✓ Trades exported to 'backtest_trades.csv'")
+
+# ============================================================================
+# KEY ASSUMPTIONS FOLLOWED
+# ============================================================================
+
+print("\n📋 ASSUMPTIONS FOLLOWED:")
+print("  a) Buy/Sell at mid price (simplifying assumption)")
+print("  b) Started with $0 capital, went negative as needed")
+print("  c) Liquidated all positions at end at last market price")
+print(f"  d) Position sizing: max {BUY_LIQUIDITY} buy, {SELL_LIQUIDITY} sell per step")
+print("  e) No strict position caps enforced (honor system)")
+
+print("\n✅ Backtest complete!")
+print(f"   Final P&L: ${capital:,.2f}")
