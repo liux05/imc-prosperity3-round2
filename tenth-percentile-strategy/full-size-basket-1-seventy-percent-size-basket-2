@@ -1,0 +1,300 @@
+"""
+==================================================================================
+BACKTEST IMPLEMENTATION - Dual Basket Arbitrage Strategy
+Basket 1: 100% liquidity (better conditions)
+Basket 2: 70% liquidity (secondary)
+Uses actual buy_liquidity and sell_liquidity from CSV
+==================================================================================
+"""
+
+import pandas as pd
+import numpy as np
+
+# ============================================================================
+# LOAD DATA
+# ============================================================================
+
+url = 'https://raw.githubusercontent.com/liux05/imc-prosperity3-round2-data/refs/heads/main/apexoa.csv'
+df_long = pd.read_csv(url)
+
+# Pivot to get prices
+prices_all = df_long.pivot_table(
+    values='mid_price',
+    index='timestamp',
+    columns='product'
+)
+
+# Pivot to get liquidity limits
+buy_liq_all = df_long.pivot_table(
+    values='buy_liquidity',
+    index='timestamp',
+    columns='product'
+)
+
+sell_liq_all = df_long.pivot_table(
+    values='sell_liquidity',
+    index='timestamp',
+    columns='product'
+)
+
+# Create main dataframe
+prices = pd.DataFrame(index=prices_all.index)
+prices['C'] = prices_all['CROISSANTS']
+prices['J'] = prices_all['JAMS']
+prices['D'] = prices_all['DJEMBES']
+prices['B1_market'] = prices_all['PICNIC_BASKET1']
+prices['B2_market'] = prices_all['PICNIC_BASKET2']
+
+# Add liquidity limits
+prices['B1_buy_liq'] = buy_liq_all['PICNIC_BASKET1']
+prices['B1_sell_liq'] = sell_liq_all['PICNIC_BASKET1']
+prices['B2_buy_liq'] = buy_liq_all['PICNIC_BASKET2']
+prices['B2_sell_liq'] = sell_liq_all['PICNIC_BASKET2']
+
+# Calculate theoretical values and demeaned spreads for both baskets
+prices['B1_theo'] = 6 * prices['C'] + 3 * prices['J'] + 1 * prices['D']
+prices['S1_raw'] = prices['B1_market'] - prices['B1_theo']
+prices['S1'] = prices['S1_raw'] - prices['S1_raw'].rolling(200, min_periods=1).mean()
+
+prices['B2_theo'] = 4 * prices['C'] + 2 * prices['J'] + 1 * prices['D']
+prices['S2_raw'] = prices['B2_market'] - prices['B2_theo']
+prices['S2'] = prices['S2_raw'] - prices['S2_raw'].rolling(200, min_periods=1).mean()
+
+print(f"✓ Loaded {len(prices)} rows of data")
+
+# ============================================================================
+# STRATEGY PARAMETERS
+# ============================================================================
+
+# Percentile-based entry (trades only extreme mispricings)
+ENTER_PERCENTILE = 10  # Enter when spread in top/bottom 10%
+EXIT_PERCENTILE = 45   # Exit when spread moves back toward center
+
+# Position sizing multipliers
+B1_LIQUIDITY_PCT = 1.0   # Use 100% of available liquidity for B1
+B2_LIQUIDITY_PCT = 0.7   # Use 70% of available liquidity for B2
+
+# Calculate entry/exit thresholds for both baskets
+# Basket 1 thresholds
+upper_entry_b1 = np.percentile(prices['S1'], 100 - ENTER_PERCENTILE)
+lower_entry_b1 = np.percentile(prices['S1'], ENTER_PERCENTILE)
+upper_exit_b1 = np.percentile(prices['S1'], 100 - EXIT_PERCENTILE)
+lower_exit_b1 = np.percentile(prices['S1'], EXIT_PERCENTILE)
+
+# Basket 2 thresholds
+upper_entry_b2 = np.percentile(prices['S2'], 100 - ENTER_PERCENTILE)
+lower_entry_b2 = np.percentile(prices['S2'], ENTER_PERCENTILE)
+upper_exit_b2 = np.percentile(prices['S2'], 100 - EXIT_PERCENTILE)
+lower_exit_b2 = np.percentile(prices['S2'], EXIT_PERCENTILE)
+
+print(f"\nBasket 1 Strategy Thresholds (100% liquidity):")
+print(f"  Enter LONG when spread <= {lower_entry_b1:.2f}")
+print(f"  Enter SHORT when spread >= {upper_entry_b1:.2f}")
+print(f"  Exit LONG when spread >= {upper_exit_b1:.2f}")
+print(f"  Exit SHORT when spread <= {lower_exit_b1:.2f}")
+
+print(f"\nBasket 2 Strategy Thresholds (70% liquidity):")
+print(f"  Enter LONG when spread <= {lower_entry_b2:.2f}")
+print(f"  Enter SHORT when spread >= {upper_entry_b2:.2f}")
+print(f"  Exit LONG when spread >= {upper_exit_b2:.2f}")
+print(f"  Exit SHORT when spread <= {lower_exit_b2:.2f}")
+
+# ============================================================================
+# BACKTEST WITH DYNAMIC LIQUIDITY FROM CSV
+# ============================================================================
+
+# Initialize tracking
+capital = 0.0
+position_b1 = 0
+position_b2 = 0
+trades = []
+
+for i in range(len(prices)):
+    timestamp = prices.index[i]
+    spread_b1 = prices['S1'].iloc[i]
+    spread_b2 = prices['S2'].iloc[i]
+    price_b1 = prices['B1_market'].iloc[i]
+    price_b2 = prices['B2_market'].iloc[i]
+    
+    # Get liquidity limits from CSV for this timestamp
+    b1_buy_liq = int(prices['B1_buy_liq'].iloc[i] * B1_LIQUIDITY_PCT)
+    b1_sell_liq = int(prices['B1_sell_liq'].iloc[i] * B1_LIQUIDITY_PCT)
+    b2_buy_liq = int(prices['B2_buy_liq'].iloc[i] * B2_LIQUIDITY_PCT)
+    b2_sell_liq = int(prices['B2_sell_liq'].iloc[i] * B2_LIQUIDITY_PCT)
+
+    # BASKET 1 LOGIC (PRIORITY - 100% LIQUIDITY)
+    action_b1 = None
+    units_b1 = 0
+
+    if position_b1 == 0:  # Flat - look for entry
+        if spread_b1 <= lower_entry_b1:
+            action_b1 = 'BUY'
+            units_b1 = b1_buy_liq  # Use actual buy liquidity from CSV
+            position_b1 += units_b1
+            capital -= units_b1 * price_b1
+
+        elif spread_b1 >= upper_entry_b1:
+            action_b1 = 'SELL'
+            units_b1 = b1_sell_liq  # Use actual sell liquidity from CSV
+            position_b1 -= units_b1
+            capital += units_b1 * price_b1
+
+    elif position_b1 > 0:  # Long position - look for exit
+        if spread_b1 >= upper_exit_b1:
+            action_b1 = 'SELL'
+            units_b1 = position_b1
+            capital += units_b1 * price_b1
+            position_b1 = 0
+
+    elif position_b1 < 0:  # Short position - look for exit
+        if spread_b1 <= lower_exit_b1:
+            action_b1 = 'BUY'
+            units_b1 = abs(position_b1)
+            capital -= units_b1 * price_b1
+            position_b1 = 0
+
+    if action_b1:
+        trades.append({
+            'timestamp': timestamp,
+            'basket': 'B1',
+            'action': action_b1,
+            'units': units_b1,
+            'price': price_b1,
+            'spread': spread_b1,
+            'position_after': position_b1,
+            'max_liquidity': b1_buy_liq if action_b1 == 'BUY' else b1_sell_liq
+        })
+
+    # BASKET 2 LOGIC (SECONDARY - 70% LIQUIDITY)
+    action_b2 = None
+    units_b2 = 0
+
+    if position_b2 == 0:  # Flat - look for entry
+        if spread_b2 <= lower_entry_b2:
+            action_b2 = 'BUY'
+            units_b2 = b2_buy_liq  # Use 70% of actual buy liquidity
+            position_b2 += units_b2
+            capital -= units_b2 * price_b2
+
+        elif spread_b2 >= upper_entry_b2:
+            action_b2 = 'SELL'
+            units_b2 = b2_sell_liq  # Use 70% of actual sell liquidity
+            position_b2 -= units_b2
+            capital += units_b2 * price_b2
+
+    elif position_b2 > 0:  # Long position - look for exit
+        if spread_b2 >= upper_exit_b2:
+            action_b2 = 'SELL'
+            units_b2 = position_b2
+            capital += units_b2 * price_b2
+            position_b2 = 0
+
+    elif position_b2 < 0:  # Short position - look for exit
+        if spread_b2 <= lower_exit_b2:
+            action_b2 = 'BUY'
+            units_b2 = abs(position_b2)
+            capital -= units_b2 * price_b2
+            position_b2 = 0
+
+    if action_b2:
+        trades.append({
+            'timestamp': timestamp,
+            'basket': 'B2',
+            'action': action_b2,
+            'units': units_b2,
+            'price': price_b2,
+            'spread': spread_b2,
+            'position_after': position_b2,
+            'max_liquidity': b2_buy_liq if action_b2 == 'BUY' else b2_sell_liq
+        })
+
+# ============================================================================
+# FINAL POSITION LIQUIDATION
+# ============================================================================
+
+final_price_b1 = prices['B1_market'].iloc[-1]
+final_price_b2 = prices['B2_market'].iloc[-1]
+
+if position_b1 != 0:
+    liquidation_value = position_b1 * final_price_b1
+    capital += liquidation_value
+    trades.append({
+        'timestamp': prices.index[-1],
+        'basket': 'B1',
+        'action': 'LIQUIDATE',
+        'units': abs(position_b1),
+        'price': final_price_b1,
+        'spread': prices['S1'].iloc[-1],
+        'position_after': 0,
+        'max_liquidity': 0
+    })
+
+if position_b2 != 0:
+    liquidation_value = position_b2 * final_price_b2
+    capital += liquidation_value
+    trades.append({
+        'timestamp': prices.index[-1],
+        'basket': 'B2',
+        'action': 'LIQUIDATE',
+        'units': abs(position_b2),
+        'price': final_price_b2,
+        'spread': prices['S2'].iloc[-1],
+        'position_after': 0,
+        'max_liquidity': 0
+    })
+
+# ============================================================================
+# RESULTS
+# ============================================================================
+
+trades_df = pd.DataFrame(trades)
+b1_trades = trades_df[trades_df['basket'] == 'B1']
+b2_trades = trades_df[trades_df['basket'] == 'B2']
+
+print("\n" + "="*70)
+print("BACKTEST RESULTS - DUAL BASKET STRATEGY")
+print("="*70)
+print(f"Final Capital (P&L):  ${capital:,.2f}")
+print(f"\nBasket 1 Trades:      {len(b1_trades)} ({len(b1_trades)/len(trades_df)*100:.1f}%)")
+print(f"Basket 2 Trades:      {len(b2_trades)} ({len(b2_trades)/len(trades_df)*100:.1f}%)")
+print(f"Total Trades:         {len(trades_df)}")
+
+# Show breakdown by basket
+print("\n--- Basket 1 First 5 Trades ---")
+print(b1_trades.head(5).to_string(index=False))
+
+print("\n--- Basket 2 First 5 Trades ---")
+print(b2_trades.head(5).to_string(index=False))
+
+print("\n--- Last 10 All Trades ---")
+print(trades_df.tail(10).to_string(index=False))
+
+print("\n" + "="*70)
+print("STRATEGY SUMMARY")
+print("="*70)
+print(f"✓ Basket 1 (priority): Uses 100% of CSV liquidity limits")
+print(f"✓ Basket 2 (secondary): Uses 70% of CSV liquidity limits")
+print(f"✓ Liquidity varies by timestamp (from CSV)")
+print(f"✓ Started with $0 capital, can go infinitely negative")
+print(f"✓ Final positions liquidated at last market price")
+print(f"✓ Entry strategy: Percentile-based (top/bottom {ENTER_PERCENTILE}%)")
+print(f"✓ Exit strategy: Mean reversion to {EXIT_PERCENTILE}th percentile")
+print("="*70)
+
+# Export trades to CSV
+trades_df.to_csv('dual_basket_trades.csv', index=False)
+print("\n✓ Trades exported to 'dual_basket_trades.csv'")
+
+# Verify compliance with rules
+print("\n" + "="*70)
+print("📋 COMPLIANCE CHECK:")
+print("="*70)
+print("  ✓ a) Each timestep: Buy/Sell at mid_price")
+print(f"  ✓    - Basket 1: Up to buy_liquidity (100%) and sell_liquidity (100%)")
+print(f"  ✓    - Basket 2: Up to buy_liquidity × 0.7 and sell_liquidity × 0.7")
+print("  ✓ b) Started with $0 capital, can go infinitely negative")
+print("  ✓ c) All remaining positions liquidated at last market price")
+print("  ✓ Honor system: No strict position caps enforced")
+
+print("\n✅ Backtest complete!")
+print(f"   Final P&L: ${capital:,.2f}")
