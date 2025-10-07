@@ -1,0 +1,93 @@
+# 1) Exploratory Analysis - Plot the data to get a feel for things
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Load data from GitHub
+url = 'https://raw.githubusercontent.com/liux05/imc-prosperity3-round2-data/refs/heads/main/apexoa.csv'
+df = pd.read_csv(url)
+
+# Reshape to wide format
+prices = df.pivot_table(
+    values='mid_price',
+    index='timestamp',
+    columns='product'
+)[['CROISSANTS', 'JAMS', 'DJEMBES', 'PICNIC_BASKET1', 'PICNIC_BASKET2']]
+
+print(f"Loaded {len(prices)} rows of data")
+print(f"\nFirst few rows:")
+print(prices.head())
+print(f"\nBasic statistics:")
+print(prices.describe())
+
+# Plot individual products
+fig, axes = plt.subplots(3, 2, figsize=(15, 12))
+
+# CROISSANTS
+axes[0, 0].plot(prices.index, prices['CROISSANTS'])
+axes[0, 0].set_title('CROISSANTS Price')
+axes[0, 0].set_ylabel('Price')
+axes[0, 0].grid(alpha=0.3)
+
+# JAMS
+axes[0, 1].plot(prices.index, prices['JAMS'], color='green')
+axes[0, 1].set_title('JAMS Price')
+axes[0, 1].set_ylabel('Price')
+axes[0, 1].grid(alpha=0.3)
+
+# DJEMBES
+axes[1, 0].plot(prices.index, prices['DJEMBES'], color='purple')
+axes[1, 0].set_title('DJEMBES Price')
+axes[1, 0].set_ylabel('Price')
+axes[1, 0].grid(alpha=0.3)
+
+# CROISSANTS vs JAMS (normalized) - Testing inverse relationship
+c_norm = (prices['CROISSANTS'] - prices['CROISSANTS'].mean()) / prices['CROISSANTS'].std()
+j_norm = (prices['JAMS'] - prices['JAMS'].mean()) / prices['JAMS'].std()
+j_inv_norm = -j_norm
+
+axes[1, 1].plot(prices.index, c_norm, label='CROISSANTS (normalized)', alpha=0.7)
+axes[1, 1].plot(prices.index, j_inv_norm, label='JAMS Inverted (normalized)',
+                alpha=0.7, linestyle='--')
+axes[1, 1].set_title('Testing Inverse Relationship: C vs Inverse J')
+axes[1, 1].set_ylabel('Normalized Value')
+axes[1, 1].legend()
+axes[1, 1].grid(alpha=0.3)
+axes[1, 1].axhline(0, color='black', linestyle='-', alpha=0.3)
+
+# BASKET 1
+axes[2, 0].plot(prices.index, prices['PICNIC_BASKET1'], color='red')
+axes[2, 0].set_title('PICNIC_BASKET1 (6C + 3J + D)')
+axes[2, 0].set_ylabel('Price')
+axes[2, 0].grid(alpha=0.3)
+
+# BASKET 2
+axes[2, 1].plot(prices.index, prices['PICNIC_BASKET2'], color='orange')
+axes[2, 1].set_title('PICNIC_BASKET2 (4C + 2J)')
+axes[2, 1].set_ylabel('Price')
+axes[2, 1].grid(alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+# Quick insights
+print("\n=== QUICK INSIGHTS ===")
+print(f"\nCROISSANTS: {prices['CROISSANTS'].iloc[0]:.2f} → {prices['CROISSANTS'].iloc[-1]:.2f} "
+      f"(change: {prices['CROISSANTS'].iloc[-1] - prices['CROISSANTS'].iloc[0]:.2f})")
+print(f"JAMS: {prices['JAMS'].iloc[0]:.2f} → {prices['JAMS'].iloc[-1]:.2f} "
+      f"(change: {prices['JAMS'].iloc[-1] - prices['JAMS'].iloc[0]:.2f})")
+print(f"DJEMBES: {prices['DJEMBES'].iloc[0]:.2f} → {prices['DJEMBES'].iloc[-1]:.2f} "
+      f"(change: {prices['DJEMBES'].iloc[-1] - prices['DJEMBES'].iloc[0]:.2f})")
+
+# Correlation between CROISSANTS and JAMS
+corr = prices['CROISSANTS'].corr(prices['JAMS'])
+print(f"\nCorrelation between CROISSANTS and JAMS: {corr:.3f}")
+if corr < -0.3:
+    print("  → Strong NEGATIVE correlation (inverse relationship detected!)")
+elif corr > 0.3:
+    print("  → Strong POSITIVE correlation")
+else:
+    print("  → Weak correlation")
+
+print("\nReady for statistical arbitrage analysis!")
