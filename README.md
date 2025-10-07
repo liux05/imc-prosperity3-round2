@@ -1,6 +1,7 @@
 # imc-prosperity3-round2
-# 🎯 Basket Statistical Arbitrage System
+# Basket Statistical Arbitrage System
 ### Production-Ready Implementation for IMC Prosperity 3 Round 2
+#### Built in Claude
 
 ---
 
