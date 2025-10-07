@@ -256,31 +256,5 @@ print("  e) No strict position caps enforced (honor system)")
 
 print("\n✅ Backtest complete!")
 print(f"   Final P&L: ${capital:,.2f}")
-
-# ============================================================================
-# COMPARISON TO EXPECTED METRICS
-# ============================================================================
-
-print("\n" + "="*70)
-print("COMPARISON CHECK")
-print("="*70)
-print("Expected from Performance Metrics document:")
-print("  Net P&L:     $2,098.87")
-print("  Total Trades: 152")
-print(f"\nActual from this backtest:")
-print(f"  Net P&L:     ${capital:,.2f}")
 print(f"  Total Trades: {total_trades}")
-print(f"\nDifference:")
-print(f"  P&L diff:    ${capital - 2098.87:,.2f}")
-print(f"  Trade diff:  {total_trades - 152}")
-
-if abs(capital - 2098.87) < 1.0 and abs(total_trades - 152) <= 1:
-    print("\n✅ MATCH! Results align with performance metrics document.")
-else:
-    print("\n⚠️  MISMATCH! Results differ from performance metrics document.")
-    print("   Possible reasons:")
-    print("   - Different entry/exit percentile parameters")
-    print("   - Transaction costs included in metrics doc but not here")
-    print("   - Different lookback window for demeaning (200 used here)")
-    print("   - Rounding differences in liquidity values")
 print("="*70)
