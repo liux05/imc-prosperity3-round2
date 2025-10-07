@@ -10,6 +10,7 @@ This module implements a complete pipeline for basket arbitrage:
 - Backtesting with realistic costs
 
 Author: Generated for IMC Prosperity 3
+FIXED: Look-ahead bias in compute_zscore_S removed
 """
 
 import numpy as np
@@ -399,17 +400,20 @@ def rolling_corr_and_fisher(
 
 def compute_ewma_zscore(x: pd.Series, halflife: int = 50) -> pd.Series:
     """
-    Compute z-score using EWMA mean and std.
+    Compute z-score using EWMA mean and std WITH PROPER LAG.
+    
+    CRITICAL FIX: Added .shift(1) to avoid look-ahead bias!
     
     Args:
         x: Time series
         halflife: EWMA halflife
     
     Returns:
-        Z-score series
+        Z-score series (properly lagged)
     """
-    ewma_mean = x.ewm(halflife=halflife, adjust=False).mean()
-    ewma_std = x.ewm(halflife=halflife, adjust=False).std()
+    # FIXED: Added .shift(1) to prevent look-ahead bias
+    ewma_mean = x.ewm(halflife=halflife, adjust=False).mean().shift(1)
+    ewma_std = x.ewm(halflife=halflife, adjust=False).std().shift(1)
     
     zscore = (x - ewma_mean) / ewma_std.replace(0, np.nan)
     return zscore
@@ -496,7 +500,19 @@ def compute_zscore_S(
     halflife_sigma: int = 50
 ) -> pd.Series:
     """
-    Compute z-score of mispricing spread using EWMA.
+    Compute z-score of mispricing spread using EWMA WITH PROPER LAG.
+    
+    🔴 CRITICAL FIX: Added .shift(1) to prevent look-ahead bias!
+    
+    Without shift(1):
+    - At time t, EWMA includes value at time t
+    - This is cheating - you're "knowing the future"
+    - Results in artificially good backtest, terrible live trading
+    
+    With shift(1):
+    - At time t, EWMA only uses data up to time t-1
+    - This is realistic - you only know the past
+    - Backtest will match live trading performance
     
     Typical range: −4 to +4 (±6 extreme, ±20 likely scaling error)
     
@@ -506,10 +522,11 @@ def compute_zscore_S(
         halflife_sigma: EWMA halflife for std
     
     Returns:
-        Z-score of S
+        Z-score of S (properly lagged to avoid look-ahead bias)
     """
-    ewma_mu = S.ewm(halflife=halflife_mu, adjust=False).mean()
-    ewma_sigma = S.ewm(halflife=halflife_sigma, adjust=False).std()
+    # FIXED: Added .shift(1) to both mean and std calculations
+    ewma_mu = S.ewm(halflife=halflife_mu, adjust=False).mean().shift(1)
+    ewma_sigma = S.ewm(halflife=halflife_sigma, adjust=False).std().shift(1)
     
     z_S = (S - ewma_mu) / ewma_sigma.replace(0, np.nan)
     
@@ -681,7 +698,7 @@ def backtest(
         hysteresis=config.hysteresis_bars
     )
     
-    # Compute z-score of spread
+    # Compute z-score of spread (NOW FIXED!)
     z_S = compute_zscore_S(
         df['S'], 
         halflife_mu=config.halflife_mu, 
