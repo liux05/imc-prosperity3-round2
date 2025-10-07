@@ -1,0 +1,373 @@
+"""
+QUICK START SCRIPT - Basket Statistical Arbitrage
+IMC Prosperity 3 Round 2
+
+Copy-paste this entire script to get started immediately.
+Adjust the CSV path to your data location.
+"""
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ============================================================================
+# STEP 1: LOAD YOUR DATA
+# ============================================================================
+
+print("Step 1: Loading data...")
+
+# Option A: Load from GitHub URL
+url = 'https://raw.githubusercontent.com/liux05/imc-prosperity3-round2-data/refs/heads/main/apexoa.csv'
+df_long = pd.read_csv(url)
+
+# Option B: Load from local file
+# df_long = pd.read_csv('apexoa.csv')
+
+# Reshape to wide format
+prices = df_long.pivot_table(
+    values='mid_price',
+    index='timestamp',
+    columns='product'
+)[['CROISSANTS', 'JAMS', 'DJEMBES']]
+prices.columns = ['C', 'J', 'D']
+
+print(f"✓ Loaded {len(prices)} rows")
+print(prices.head())
+
+# ============================================================================
+# STEP 2: RUN MEAN REVERSION TESTS
+# ============================================================================
+
+print("\nStep 2: Testing mean reversion...")
+
+from basket_stat_arb import (
+    build_baskets_and_spread,
+    mean_reversion_tests
+)
+
+# Build baskets and spread
+df = build_baskets_and_spread(prices)
+
+# Test spread for mean reversion
+mr_stats = mean_reversion_tests(df['S'])
+print(f"\n{'='*60}")
+print("MEAN REVERSION TEST RESULTS")
+print(f"{'='*60}")
+print(mr_stats)
+
+if mr_stats.is_tradeable:
+    print("\n✓ SPREAD IS TRADEABLE!")
+    print("  The mispricing spread shows strong mean reversion characteristics.")
+else:
+    print("\n⚠ WARNING: Spread may not be strongly mean-reverting.")
+    print("  Consider adjusting parameters or using different data window.")
+
+# ============================================================================
+# STEP 3: DETECT DIVERGENCE PERIODS
+# ============================================================================
+
+print("\nStep 3: Detecting divergence periods...")
+
+from basket_arb_viz import (
+    analyze_divergence_periods,
+    print_divergence_report,
+    plot_divergence_analysis
+)
+from basket_stat_arb import BacktestConfig
+
+# Create config
+config = BacktestConfig(
+    z_enter=2.0,
+    z_exit=0.5,
+    halflife_mu=50,
+    halflife_sigma=50,
+    rolling_window=50,
+    hysteresis_bars=5
+)
+
+# Run divergence analysis
+analysis = analyze_divergence_periods(prices, config, return_detailed=True)
+
+# Print report
+print_divergence_report(analysis)
+
+# Get divergence periods
+divergence_periods = analysis['divergence_periods']
+
+# ============================================================================
+# STEP 4: RUN BACKTEST
+# ============================================================================
+
+print("\nStep 4: Running backtest...")
+
+from basket_stat_arb import backtest, print_backtest_summary
+
+results = backtest(prices, config)
+print_backtest_summary(results)
+
+# ============================================================================
+# STEP 5: VISUALIZE RESULTS
+# ============================================================================
+
+print("\nStep 5: Creating visualizations...")
+
+from basket_arb_viz import plot_backtest_results, plot_component_analysis
+
+# Main backtest dashboard
+fig1 = plot_backtest_results(results)
+fig1.savefig('backtest_results.png', dpi=150, bbox_inches='tight')
+print("✓ Saved: backtest_results.png")
+
+# Component analysis
+fig2 = plot_component_analysis(results)
+fig2.savefig('component_analysis.png', dpi=150, bbox_inches='tight')
+print("✓ Saved: component_analysis.png")
+
+# Divergence analysis
+fig3 = plot_divergence_analysis(analysis)
+fig3.savefig('divergence_analysis.png', dpi=150, bbox_inches='tight')
+print("✓ Saved: divergence_analysis.png")
+
+plt.show()
+
+# ============================================================================
+# STEP 6: EXTRACT KEY INSIGHTS
+# ============================================================================
+
+print("\n" + "="*60)
+print("KEY INSIGHTS & NEXT STEPS")
+print("="*60)
+
+metrics = results['metrics']
+stats = analysis['summary_stats']
+
+print(f"\n📊 PERFORMANCE METRICS:")
+print(f"  • Total Return: {metrics['total_return']:.2f}")
+print(f"  • Sharpe Ratio: {metrics['sharpe_ratio']:.2f}")
+print(f"  • Max Drawdown: {metrics['max_drawdown']:.1%}")
+print(f"  • Win Rate: {metrics['win_rate']:.1%}")
+print(f"  • Total Trades: {metrics['total_trades']}")
+
+print(f"\n🔍 DIVERGENCE ANALYSIS:")
+print(f"  • Divergence Periods Detected: {stats['total_periods']}")
+print(f"  • Time in Divergence: {stats['divergence_pct']:.1f}%")
+print(f"  • Avg Divergence Duration: {stats['avg_duration']:.1f} bars")
+
+print(f"\n📈 MEAN REVERSION:")
+print(f"  • ADF p-value: {mr_stats.adf_pvalue:.4f} {'✓' if mr_stats.adf_pvalue < 0.1 else '✗'}")
+print(f"  • Hurst Exponent: {mr_stats.hurst_exponent:.3f} {'✓' if mr_stats.hurst_exponent < 0.5 else '✗'}")
+print(f"  • Half-life: {mr_stats.half_life:.1f} bars {'✓' if mr_stats.half_life < 100 else '✗'}")
+
+print(f"\n💡 RECOMMENDATIONS:")
+
+if metrics['sharpe_ratio'] > 1.5:
+    print("  ✓ Strategy shows strong performance")
+elif metrics['sharpe_ratio'] > 0.5:
+    print("  ⚠ Strategy is marginally profitable - consider parameter tuning")
+else:
+    print("  ✗ Strategy is underperforming - review parameters and data")
+
+if stats['divergence_pct'] > 30:
+    print("  ⚠ High divergence time - consider tightening regime detection")
+elif stats['divergence_pct'] < 5:
+    print("  ⚠ Low divergence detection - may be missing regime breaks")
+else:
+    print("  ✓ Divergence detection appears balanced")
+
+if mr_stats.is_tradeable:
+    print("  ✓ Spread exhibits tradeable mean reversion")
+else:
+    print("  ✗ Spread may not be sufficiently mean-reverting")
+
+# ============================================================================
+# STEP 7: PARAMETER TUNING (OPTIONAL)
+# ============================================================================
+
+print(f"\n{'='*60}")
+print("OPTIONAL: PARAMETER SENSITIVITY ANALYSIS")
+print(f"{'='*60}")
+
+run_sensitivity = input("\nRun parameter sensitivity analysis? (y/n): ").lower() == 'y'
+
+if run_sensitivity:
+    from basket_arb_viz import parameter_sensitivity_analysis, plot_parameter_sensitivity
+    
+    print("Testing different z_enter values...")
+    z_values = [1.5, 2.0, 2.5, 3.0]
+    sensitivity = parameter_sensitivity_analysis(
+        prices, config, 'z_enter', z_values, backtest
+    )
+    
+    print("\nSensitivity Results:")
+    print(sensitivity)
+    
+    # Find optimal
+    best_idx = sensitivity['sharpe_ratio'].idxmax()
+    optimal = sensitivity.iloc[best_idx]
+    print(f"\n✓ Optimal z_enter: {optimal['z_enter']}")
+    print(f"  Sharpe: {optimal['sharpe_ratio']:.2f}")
+    print(f"  Total Return: {optimal['total_return']:.2f}")
+    
+    # Plot
+    fig = plot_parameter_sensitivity(sensitivity, 'z_enter')
+    fig.savefig('sensitivity_analysis.png', dpi=150, bbox_inches='tight')
+    print("✓ Saved: sensitivity_analysis.png")
+    plt.show()
+
+# ============================================================================
+# STEP 8: EXPORT SIGNALS FOR TRADING
+# ============================================================================
+
+print(f"\n{'='*60}")
+print("EXPORT TRADING SIGNALS")
+print(f"{'='*60}")
+
+# Extract signals DataFrame
+signals = results['signals']
+legs = results['legs']
+
+# Combine into trading signals
+trading_signals = pd.DataFrame({
+    'timestamp': signals.index,
+    'z_score': signals['z_S'],
+    'regime': signals['regime'].map({0: 'Correlated', 1: 'Divergence'}),
+    'signal': signals['signal_side'].map({0: 'FLAT', 1: 'LONG', -1: 'SHORT'}),
+    'position': signals['target_position'],
+    'entry': signals['entry'],
+    'exit': signals['exit'],
+    'w_B1': legs['w_B1'],
+    'w_B2': legs['w_B2'],
+    'w_D': legs['w_D']
+})
+
+# Show recent signals
+print("\nRecent Trading Signals:")
+print(trading_signals.tail(10))
+
+# Export to CSV
+export_signals = input("\nExport signals to CSV? (y/n): ").lower() == 'y'
+
+if export_signals:
+    trading_signals.to_csv('trading_signals.csv', index=False)
+    print("✓ Saved: trading_signals.csv")
+    
+    # Also export divergence periods
+    divergence_df = pd.DataFrame(divergence_periods, columns=['start', 'end'])
+    divergence_df['duration'] = divergence_df['end'] - divergence_df['start']
+    divergence_df.to_csv('divergence_periods.csv', index=False)
+    print("✓ Saved: divergence_periods.csv")
+
+# ============================================================================
+# SUMMARY
+# ============================================================================
+
+print(f"\n{'='*60}")
+print("ANALYSIS COMPLETE!")
+print(f"{'='*60}")
+
+print("\nGenerated Files:")
+print("  📊 backtest_results.png - Main performance dashboard")
+print("  📈 component_analysis.png - C-J relationship analysis")
+print("  🔍 divergence_analysis.png - Divergence detection details")
+
+if run_sensitivity:
+    print("  📉 sensitivity_analysis.png - Parameter sensitivity")
+
+if export_signals:
+    print("  💾 trading_signals.csv - Timestamped trading signals")
+    print("  💾 divergence_periods.csv - Detected divergence periods")
+
+print(f"\n✓ Quick start complete!")
+print("\nNext steps:")
+print("  1. Review the visualizations")
+print("  2. Validate divergence detection matches your observations")
+print("  3. Adjust parameters if needed (config.z_enter, config.z_exit, etc.)")
+print("  4. Run sensitivity analysis to find optimal parameters")
+print("  5. Use trading_signals.csv for execution")
+
+print("\n" + "="*60)
+print("Questions? Check the full guide: basket_arb_guide.md")
+print("="*60 + "\n")
+
+# ============================================================================
+# INTERACTIVE MODE (OPTIONAL)
+# ============================================================================
+
+interactive = input("Enter interactive mode to explore results? (y/n): ").lower() == 'y'
+
+if interactive:
+    print("\n" + "="*60)
+    print("INTERACTIVE MODE")
+    print("="*60)
+    print("\nAvailable objects:")
+    print("  • prices - Price DataFrame (C, J, D)")
+    print("  • df - Baskets and spread (B1, B2, S)")
+    print("  • config - Backtest configuration")
+    print("  • results - Full backtest results")
+    print("  • analysis - Divergence analysis results")
+    print("  • signals - Trading signals DataFrame")
+    print("  • divergence_periods - List of (start, end) tuples")
+    
+    print("\nExample queries:")
+    print("  >>> df['S'].describe()  # Spread statistics")
+    print("  >>> signals[signals['entry']].head()  # Show entry points")
+    print("  >>> regime = analysis['regime_series']  # Get regime series")
+    print("  >>> regime[regime == 1]  # Show divergence timestamps")
+    
+    print("\nType 'exit' to quit interactive mode")
+    print("="*60 + "\n")
+    
+    # Keep session alive for interactive exploration
+    import code
+    code.interact(local=locals())
+
+# ============================================================================
+# FUNCTION REFERENCE
+# ============================================================================
+
+def print_function_reference():
+    """Print quick reference of all available functions."""
+    print("\n" + "="*60)
+    print("FUNCTION REFERENCE")
+    print("="*60)
+    
+    print("\n📦 basket_stat_arb.py (Core Engine):")
+    print("  build_baskets_and_spread(df)")
+    print("  mean_reversion_tests(series)")
+    print("  fit_pair_model_rolling_ols(C, J, window)")
+    print("  rolling_corr_and_fisher(C, J, window, alpha)")
+    print("  classify_regime_rules(corr_df, residual_z, distance, hysteresis)")
+    print("  compute_zscore_S(S, halflife_mu, halflife_sigma)")
+    print("  generate_signals(S, z_S, regime, config)")
+    print("  backtest(prices_df, config)")
+    
+    print("\n📊 basket_arb_viz.py (Visualization):")
+    print("  plot_backtest_results(results)")
+    print("  plot_component_analysis(results)")
+    print("  analyze_divergence_periods(prices_df, config)")
+    print("  print_divergence_report(analysis)")
+    print("  plot_divergence_analysis(analysis)")
+    print("  parameter_sensitivity_analysis(prices, config, param, values, backtest)")
+    print("  run_parameter_sweep(prices, config, backtest, param_grid)")
+    print("  detect_change_points(series, method, penalty)")
+    print("  classify_regime_hmm(features, n_states)")
+    
+    print("\n⚙️ BacktestConfig Parameters:")
+    print("  z_enter=2.0         # Entry threshold")
+    print("  z_exit=0.5          # Exit threshold")
+    print("  z_cap=4.0           # Position size cap")
+    print("  halflife_mu=50      # EWMA halflife for mean")
+    print("  halflife_sigma=50   # EWMA halflife for std")
+    print("  rolling_window=50   # Window for rolling stats")
+    print("  hysteresis_bars=5   # Bars to confirm regime switch")
+    print("  regime_method='rules'  # 'rules' or 'hmm'")
+    print("  max_gross_exposure=1.0")
+    print("  commission_bps=1.0")
+    print("  half_spread_bps=2.0")
+    
+    print("\n" + "="*60 + "\n")
+
+
+# Add function reference to help
+if __name__ == "__main__":
+    print("\nℹ️  Type print_function_reference() for a complete function list")
