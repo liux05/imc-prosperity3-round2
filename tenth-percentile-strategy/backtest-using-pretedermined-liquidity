@@ -2,6 +2,7 @@
 ==================================================================================
 BACKTEST IMPLEMENTATION - Basket Arbitrage Strategy
 Based on optimized percentile-based entry strategy
+FIXED: Now uses actual liquidity values from CSV
 ==================================================================================
 """
 
@@ -15,12 +16,27 @@ import numpy as np
 url = 'https://raw.githubusercontent.com/liux05/imc-prosperity3-round2-data/refs/heads/main/apexoa.csv'
 df_long = pd.read_csv(url)
 
+# Pivot to get prices
 prices_all = df_long.pivot_table(
     values='mid_price',
     index='timestamp',
     columns='product'
 )
 
+# Pivot to get liquidity limits from CSV
+buy_liq_all = df_long.pivot_table(
+    values='buy_liquidity',
+    index='timestamp',
+    columns='product'
+)
+
+sell_liq_all = df_long.pivot_table(
+    values='sell_liquidity',
+    index='timestamp',
+    columns='product'
+)
+
+# Create main dataframe
 prices = pd.DataFrame(index=prices_all.index)
 prices['C'] = prices_all['CROISSANTS']
 prices['J'] = prices_all['JAMS']
@@ -28,12 +44,17 @@ prices['D'] = prices_all['DJEMBES']
 prices['B1_market'] = prices_all['PICNIC_BASKET1']
 prices['B2_market'] = prices_all['PICNIC_BASKET2']
 
+# Add liquidity limits from CSV
+prices['B1_buy_liq'] = buy_liq_all['PICNIC_BASKET1']
+prices['B1_sell_liq'] = sell_liq_all['PICNIC_BASKET1']
+
 # Calculate theoretical value and demeaned spread
 prices['B1_theo'] = 6 * prices['C'] + 3 * prices['J'] + 1 * prices['D']
 prices['S_raw'] = prices['B1_market'] - prices['B1_theo']
 prices['S'] = prices['S_raw'] - prices['S_raw'].rolling(200, min_periods=1).mean()
 
 print(f"✓ Loaded {len(prices)} rows of data")
+print(f"✓ Liquidity ranges: Buy [{prices['B1_buy_liq'].min():.0f}-{prices['B1_buy_liq'].max():.0f}], Sell [{prices['B1_sell_liq'].min():.0f}-{prices['B1_sell_liq'].max():.0f}]")
 
 # ============================================================================
 # STRATEGY PARAMETERS (OPTIMIZED)
@@ -42,10 +63,6 @@ print(f"✓ Loaded {len(prices)} rows of data")
 # Percentile-based entry (trades only extreme mispricings)
 ENTER_PERCENTILE = 10  # Enter when spread in top/bottom 10%
 EXIT_PERCENTILE = 45   # Exit when spread moves back toward center
-
-# Position sizing
-BUY_LIQUIDITY = 1      # Max units to buy per timestamp
-SELL_LIQUIDITY = 1     # Max units to sell per timestamp
 
 # Calculate entry/exit thresholds
 upper_entry = np.percentile(prices['S'], 100 - ENTER_PERCENTILE)
@@ -60,19 +77,22 @@ print(f"  Exit LONG when spread >= {upper_exit:.2f}")
 print(f"  Exit SHORT when spread <= {lower_exit:.2f}")
 
 # ============================================================================
-# BACKTEST WITH POSITION SIZING
+# BACKTEST WITH ACTUAL CSV LIQUIDITY
 # ============================================================================
 
 # Initialize tracking
 capital = 0.0  # Start with $0, can go negative
 position = 0   # Current basket position (can be + or -)
 trades = []
-cash_flows = []
 
 for i in range(len(prices)):
     timestamp = prices.index[i]
     spread = prices['S'].iloc[i]
     basket_price = prices['B1_market'].iloc[i]
+    
+    # Get actual liquidity from CSV for this timestamp
+    buy_liquidity = int(prices['B1_buy_liq'].iloc[i])
+    sell_liquidity = int(prices['B1_sell_liq'].iloc[i])
     
     # Determine action based on spread and current position
     action = None
@@ -82,14 +102,14 @@ for i in range(len(prices)):
         if spread <= lower_entry:
             # Spread too negative - basket underpriced - BUY
             action = 'BUY'
-            units = min(BUY_LIQUIDITY, BUY_LIQUIDITY)  # Respect liquidity
+            units = buy_liquidity  # Use actual CSV liquidity
             position += units
             capital -= units * basket_price  # Pay for basket
             
         elif spread >= upper_entry:
             # Spread too positive - basket overpriced - SELL
             action = 'SELL'
-            units = min(SELL_LIQUIDITY, SELL_LIQUIDITY)
+            units = sell_liquidity  # Use actual CSV liquidity
             position -= units
             capital += units * basket_price  # Receive cash from sale
     
@@ -117,13 +137,8 @@ for i in range(len(prices)):
             'units': units,
             'price': basket_price,
             'spread': spread,
-            'position_after': position
-        })
-        
-        cash_flows.append({
-            'timestamp': timestamp,
-            'cash_flow': -units * basket_price if action == 'BUY' else units * basket_price,
-            'capital': capital
+            'position_after': position,
+            'max_liquidity': buy_liquidity if action == 'BUY' else sell_liquidity
         })
 
 # ============================================================================
@@ -142,22 +157,68 @@ if position != 0:
         'units': abs(position),
         'price': final_price,
         'spread': prices['S'].iloc[-1],
-        'position_after': 0
+        'position_after': 0,
+        'max_liquidity': 0
     })
+
+# ============================================================================
+# CALCULATE DETAILED METRICS
+# ============================================================================
+
+trades_df = pd.DataFrame(trades)
+
+# Separate entry and exit trades
+entry_trades = trades_df[trades_df['action'].isin(['BUY', 'SELL']) & 
+                         (trades_df['timestamp'] != prices.index[-1])]
+exit_trades = entry_trades.copy()  # For now, same set
+
+# Calculate trade P&L (for round-trip analysis)
+trade_pnl = []
+entry_price = None
+entry_action = None
+entry_units = 0
+
+for idx, trade in trades_df.iterrows():
+    if trade['action'] in ['BUY', 'SELL'] and entry_price is None:
+        # This is an entry
+        entry_price = trade['price']
+        entry_action = trade['action']
+        entry_units = trade['units']
+    elif trade['action'] in ['BUY', 'SELL'] and entry_price is not None:
+        # This is an exit
+        if entry_action == 'BUY':
+            pnl = entry_units * (trade['price'] - entry_price)
+        else:  # entry_action == 'SELL'
+            pnl = entry_units * (entry_price - trade['price'])
+        trade_pnl.append(pnl)
+        entry_price = None
+        entry_action = None
+        entry_units = 0
+
+# Statistics
+total_trades = len(trades_df)
+winning_trades = len([p for p in trade_pnl if p > 0])
+losing_trades = len([p for p in trade_pnl if p < 0])
+win_rate = winning_trades / len(trade_pnl) if trade_pnl else 0
+avg_win = np.mean([p for p in trade_pnl if p > 0]) if winning_trades > 0 else 0
+avg_loss = np.mean([p for p in trade_pnl if p < 0]) if losing_trades > 0 else 0
 
 # ============================================================================
 # RESULTS
 # ============================================================================
 
-trades_df = pd.DataFrame(trades)
-
 print("\n" + "="*70)
 print("BACKTEST RESULTS")
 print("="*70)
 print(f"Final Capital (P&L):  ${capital:,.2f}")
-print(f"Total Trades:         {len(trades)}")
-print(f"Entry Trades:         {len([t for t in trades if t['action'] in ['BUY', 'SELL'] and t['timestamp'] != prices.index[-1]])}")
-print(f"Exit Trades:          {len([t for t in trades if t['action'] in ['BUY', 'SELL'] and t['timestamp'] != prices.index[-1]])}")
+print(f"Total Trades:         {total_trades}")
+print(f"Round-trip Trades:    {len(trade_pnl)}")
+print(f"Winning Trades:       {winning_trades} ({win_rate:.1%})")
+print(f"Losing Trades:        {losing_trades}")
+print(f"Avg Win:              ${avg_win:,.2f}")
+print(f"Avg Loss:             ${avg_loss:,.2f}")
+if avg_loss != 0:
+    print(f"Win/Loss Ratio:       {abs(avg_win/avg_loss):.2f}x")
 
 # Show first 10 and last 10 trades
 print("\n--- First 10 Trades ---")
@@ -169,7 +230,8 @@ print(trades_df.tail(10).to_string(index=False))
 print("\n" + "="*70)
 print("STRATEGY SUMMARY")
 print("="*70)
-print(f"✓ Position sizing: Buy up to {BUY_LIQUIDITY}, Sell up to {SELL_LIQUIDITY}")
+print(f"✓ Position sizing: Uses actual CSV buy_liquidity and sell_liquidity")
+print(f"✓ Liquidity varies by timestamp (min: {prices['B1_buy_liq'].min():.0f}, max: {prices['B1_buy_liq'].max():.0f})")
 print(f"✓ Started with $0, can go infinitely negative")
 print(f"✓ Final positions liquidated at last market price")
 print(f"✓ Entry strategy: Percentile-based (top/bottom {ENTER_PERCENTILE}%)")
@@ -189,8 +251,36 @@ print("\n📋 ASSUMPTIONS FOLLOWED:")
 print("  a) Buy/Sell at mid price (simplifying assumption)")
 print("  b) Started with $0 capital, went negative as needed")
 print("  c) Liquidated all positions at end at last market price")
-print(f"  d) Position sizing: max {BUY_LIQUIDITY} buy, {SELL_LIQUIDITY} sell per step")
+print("  d) Position sizing: Uses actual buy_liquidity and sell_liquidity from CSV")
 print("  e) No strict position caps enforced (honor system)")
 
 print("\n✅ Backtest complete!")
 print(f"   Final P&L: ${capital:,.2f}")
+
+# ============================================================================
+# COMPARISON TO EXPECTED METRICS
+# ============================================================================
+
+print("\n" + "="*70)
+print("COMPARISON CHECK")
+print("="*70)
+print("Expected from Performance Metrics document:")
+print("  Net P&L:     $2,098.87")
+print("  Total Trades: 152")
+print(f"\nActual from this backtest:")
+print(f"  Net P&L:     ${capital:,.2f}")
+print(f"  Total Trades: {total_trades}")
+print(f"\nDifference:")
+print(f"  P&L diff:    ${capital - 2098.87:,.2f}")
+print(f"  Trade diff:  {total_trades - 152}")
+
+if abs(capital - 2098.87) < 1.0 and abs(total_trades - 152) <= 1:
+    print("\n✅ MATCH! Results align with performance metrics document.")
+else:
+    print("\n⚠️  MISMATCH! Results differ from performance metrics document.")
+    print("   Possible reasons:")
+    print("   - Different entry/exit percentile parameters")
+    print("   - Transaction costs included in metrics doc but not here")
+    print("   - Different lookback window for demeaning (200 used here)")
+    print("   - Rounding differences in liquidity values")
+print("="*70)
